@@ -272,18 +272,22 @@ async function executeSingleSolveAttempt(
 
     const durationMs = Date.now() - attemptStartTime;
 
-    const isSuccessful =
-      !!stepResult.token ||
-      !!stepResult.cfClearance ||
-      !!cfClearance ||
-      (!!cookiesRecord && Object.keys(cookiesRecord).some((k) => k.toLowerCase().startsWith('cf_')));
+    const hasValidToken = typeof stepResult.token === 'string' && stepResult.token.trim().length > 10;
+    const hasClearance = !!(stepResult.cfClearance || cfClearance);
+    const hasCookies = !!(cookiesRecord && Object.keys(cookiesRecord).some((k) => k.toLowerCase().startsWith('cf_')));
+
+    // When sitekey is requested (e.g. form Turnstile widget), token is strictly required.
+    // When NO sitekey is requested (pure Cloudflare interstitial clearance), clearance cookies suffice.
+    const isSuccessful = req.sitekey
+      ? hasValidToken
+      : (hasValidToken || hasClearance || hasCookies);
 
     if (isSuccessful) {
       logInfo('Turnstile / Cloudflare solved successfully', {
         siteurl: req.siteurl,
         durationMs,
         tokenLength: stepResult.token?.length ?? 0,
-        hasClearance: !!(stepResult.cfClearance || cfClearance),
+        hasClearance: hasClearance,
       });
 
       return {
@@ -299,7 +303,7 @@ async function executeSingleSolveAttempt(
     return {
       ok: false,
       durationMs,
-      error: stepResult.error || `Turnstile error: challenge timed out after ${timeoutMs}ms without token or clearance`,
+      error: stepResult.error || (req.sitekey ? 'Turnstile widget did not issue a token before timeout' : `Challenge timed out after ${timeoutMs}ms without clearance`),
       modeUsed: mode,
     };
   } catch (err) {
@@ -320,10 +324,10 @@ async function executeSingleSolveAttempt(
     };
   } finally {
     if (page) {
-      await page.close().catch(() => {});
+      await Promise.race([page.close(), new Promise((r) => setTimeout(r, 2000))]).catch(() => {});
     }
     if (context) {
-      await context.close().catch(() => {});
+      await Promise.race([context.close(), new Promise((r) => setTimeout(r, 2000))]).catch(() => {});
     }
     await browserManager.notifySolveCompleted(solverQueue.active);
   }
@@ -334,7 +338,7 @@ async function executeSingleSolveAttempt(
  * Runs inside ConcurrencyQueue and performs sequential proxy failover across the pool
  * (from the first working IP till the end) if multiple proxies are configured.
  */
-export async function solveTurnstile(req: SolveRequest): Promise<SolveResult> {
+export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): Promise<SolveResult> {
   const overallStartTime = Date.now();
   const totalTimeoutMs = req.timeout ?? config.defaultTimeoutMs;
   const mode: SolverMode = req.mode ?? 'harness';
@@ -455,7 +459,7 @@ export async function solveTurnstile(req: SolveRequest): Promise<SolveResult> {
         modeUsed: mode,
       }
     );
-  });
+  }, signal);
 }
 
 
@@ -542,9 +546,14 @@ async function solveWithNavigation(
   timeoutMs: number,
   startTime: number,
 ): Promise<StepSolveResult> {
+  // Abort non-essential media assets to prevent slow residential proxies from timing out on page.goto
+  await page.route('**/*.{png,jpg,jpeg,gif,webp,ico,svg,woff,woff2,ttf,mp4,webm,avi,mp3}', (route) => {
+    route.abort().catch(() => {});
+  }).catch(() => {});
+
   await page.goto(req.siteurl, {
     waitUntil: 'domcontentloaded',
-    timeout: Math.min(timeoutMs, 30000),
+    timeout: Math.min(timeoutMs, 25000),
   });
 
   const deadline = startTime + timeoutMs;

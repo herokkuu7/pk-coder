@@ -154,6 +154,13 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
   const effectiveMode: SolverMode =
     isCfManagedKey ? 'navigate' : (mode ? mode : (sitekey ? 'harness' : 'navigate'));
 
+  const abortController = new AbortController();
+  req.on('close', () => {
+    if (!res.writableEnded) {
+      abortController.abort();
+    }
+  });
+
   try {
     const solveReq: SolveRequest = {
       siteurl: siteurl.trim(),
@@ -167,7 +174,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
       cookies: cookies,
     };
 
-    const result = await solveTurnstile(solveReq);
+    const result = await solveTurnstile(solveReq, abortController.signal);
 
     const hasToken = typeof result.token === 'string' && result.token.trim().length > 10;
     const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 0;

@@ -45,7 +45,11 @@ export class ConcurrencyQueue {
     };
   }
 
-  public async run<T>(task: () => Promise<T>): Promise<T> {
+  public async run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (signal?.aborted) {
+      throw new Error('Task was aborted before entering queue');
+    }
+
     if (this.queue.length >= this.maxQueueSize) {
       this.totalRejected++;
       throw new QueueFullError(
@@ -54,7 +58,20 @@ export class ConcurrencyQueue {
     }
 
     return new Promise<T>((resolve, reject) => {
-      this.queue.push({ task, resolve, reject });
+      const item: QueuedItem<T> = { task, resolve, reject };
+
+      if (signal) {
+        const onAbort = () => {
+          const idx = this.queue.indexOf(item);
+          if (idx !== -1) {
+            this.queue.splice(idx, 1);
+            reject(new Error('Task aborted while waiting in concurrency queue'));
+          }
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      this.queue.push(item);
       this.dequeue();
     });
   }
