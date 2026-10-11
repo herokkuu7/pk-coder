@@ -252,16 +252,17 @@ async function executeSingleSolveAttempt(
 
     const durationMs = Date.now() - attemptStartTime;
 
-    const requiresToken = mode === 'harness' || !!req.sitekey;
-    const isSuccessful = requiresToken
-      ? !!stepResult.token
-      : !!(stepResult.token || stepResult.cfClearance || cfClearance);
+    const isSuccessful =
+      !!stepResult.token ||
+      !!stepResult.cfClearance ||
+      !!cfClearance ||
+      (!!cookiesRecord && Object.keys(cookiesRecord).some((k) => k.toLowerCase().startsWith('cf_')));
 
     if (isSuccessful) {
-      logInfo('Turnstile solved successfully', {
+      logInfo('Turnstile / Cloudflare solved successfully', {
         siteurl: req.siteurl,
         durationMs,
-        tokenLength: stepResult.token?.length,
+        tokenLength: stepResult.token?.length ?? 0,
         hasClearance: !!(stepResult.cfClearance || cfClearance),
       });
 
@@ -278,7 +279,7 @@ async function executeSingleSolveAttempt(
     return {
       ok: false,
       durationMs,
-      error: stepResult.error || (requiresToken && !stepResult.token ? 'Turnstile token not resolved' : `Turnstile error: challenge timed out after ${timeoutMs}ms without token`),
+      error: stepResult.error || `Turnstile error: challenge timed out after ${timeoutMs}ms without token or clearance`,
       modeUsed: mode,
     };
   } catch (err) {

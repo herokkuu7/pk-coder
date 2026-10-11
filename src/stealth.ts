@@ -10,7 +10,10 @@ export const STEALTH_CHROMIUM_ARGS: string[] = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage', // Critical in Docker/Render cgroups (uses /tmp instead of 64MB /dev/shm)
-  '--disable-gpu',
+  '--enable-webgl',
+  '--use-gl=angle',
+  '--use-angle=swiftshader',
+  '--ignore-gpu-blocklist',
   '--no-first-run',
   '--no-default-browser-check',
   '--disable-background-networking',
