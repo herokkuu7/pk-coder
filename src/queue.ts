@@ -74,8 +74,8 @@ export class ConcurrencyQueue {
       try {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutTimer = setTimeout(() => {
-            reject(new Error('Task execution timed out after 40s in concurrency queue'));
-          }, 40_000);
+            reject(new Error('Task execution timed out after 75s in concurrency queue'));
+          }, 75_000);
         });
 
         const result = await Promise.race([item.task(), timeoutPromise]);
