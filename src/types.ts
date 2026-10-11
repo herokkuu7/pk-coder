@@ -14,6 +14,7 @@ export interface SolveRequest {
   proxy?: string | ProxyConfig;
   timeout?: number;
   mode?: SolverMode;
+  userAgent?: string;
 }
 
 export interface SolveResult {

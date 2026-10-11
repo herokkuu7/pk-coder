@@ -217,7 +217,7 @@ async function executeSingleSolveAttempt(
       proxyServer: proxyConfig?.server,
     });
 
-    context = await browserManager.createContext(proxyConfig);
+    context = await browserManager.createContext(proxyConfig, req.userAgent);
     page = await context.newPage();
 
     page.setDefaultTimeout(timeoutMs);

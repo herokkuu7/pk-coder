@@ -113,7 +113,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const { siteurl, sitekey, action, cdata, proxy, timeout, mode } = body;
+  const { siteurl, sitekey, action, cdata, proxy, timeout, mode, userAgent } = body;
 
   if (!siteurl || typeof siteurl !== 'string') {
     res.status(400).json({ ok: false, error: 'Missing or invalid "siteurl" parameter' });
@@ -150,6 +150,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
       proxy: proxy,
       timeout: typeof timeout === 'number' && timeout > 0 ? timeout : undefined,
       mode: effectiveMode,
+      userAgent: typeof userAgent === 'string' && userAgent.trim() ? userAgent.trim() : undefined,
     };
 
     const result = await solveTurnstile(solveReq);
