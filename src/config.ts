@@ -6,7 +6,7 @@ dotenv.config();
 export const config = {
   port: parseInt(process.env.PORT || '10000', 10),
   host: process.env.HOST || '0.0.0.0',
-  defaultTimeoutMs: parseInt(process.env.DEFAULT_TIMEOUT_MS || '45000', 10),
+  defaultTimeoutMs: parseInt(process.env.DEFAULT_TIMEOUT_MS || '65000', 10),
   maxConcurrentSolves: Math.max(1, parseInt(process.env.MAX_CONCURRENT_SOLVES || '1', 10)),
   maxQueueSize: Math.max(1, parseInt(process.env.MAX_QUEUE_SIZE || '10', 10)),
   maxSolvesBeforeRecycle: Math.max(5, parseInt(process.env.MAX_SOLVES_BEFORE_RECYCLE || '50', 10)),

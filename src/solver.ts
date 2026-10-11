@@ -399,7 +399,7 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
       const remainingTime = totalTimeoutMs - elapsed;
 
       // Abort failover if insufficient time left for a browser solve
-      if (remainingTime < 5000 && attempt > 0) {
+      if (remainingTime < 15000 && attempt > 0) {
         logWarn('Insufficient time remaining for next proxy in pool, aborting failover', {
           remainingTime,
           attempt,
@@ -408,10 +408,11 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
         break;
       }
 
-      // Proportional budget per proxy candidate
+      // Budget per candidate: ensure candidate gets at least 32s if remainingTime allows,
+      // so Cloudflare clearance (which takes 20-28s on residential proxies) is not cut off prematurely.
       const candidateBudget = Math.min(
         remainingTime,
-        Math.max(15000, Math.floor(remainingTime / (proxyPool.size - attempt))),
+        Math.max(32000, Math.floor(remainingTime / Math.max(1, proxyPool.size - attempt))),
       );
 
       logInfo('Attempting Turnstile solve with pool proxy', {
