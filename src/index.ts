@@ -156,10 +156,15 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
 
     const hasToken = typeof result.token === 'string' && result.token.trim().length > 10;
     const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 0;
-    const hasCookies = result.cookies && Object.keys(result.cookies).length > 0;
+    const hasCookies = !!(result.cookies && Object.keys(result.cookies).length > 0);
 
-    // For Turnstile widget requests (sitekey present), a token is strictly required
-    const isSuccess = result.ok && (sitekey ? hasToken : (hasToken || hasClearance || hasCookies));
+    // For Codeforces (navigate mode), we accept clearance cookies even when a sitekey is present,
+    // because navigate mode bypasses the harness and returns cf_clearance instead of a Turnstile token.
+    // For harness mode (other sitekeys), a token is strictly required.
+    const isSuccess = result.ok && (
+      hasToken ||
+      (isCfManagedKey && (hasClearance || hasCookies))
+    );
 
     if (isSuccess) {
       res.status(200).json({

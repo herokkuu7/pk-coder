@@ -531,18 +531,22 @@ async function solveWithNavigation(
   let lastClickTime = 0;
 
   while (Date.now() < deadline) {
-    // 1. Check for resolved token
+    // 1. Check for a real Turnstile token on the page
     const token = await extractTokenFromPage(page);
     if (token) return { token };
 
-    // 2. Check if cf_clearance was issued
+    // 2. Check if cf_clearance was issued (real cookie value)
     const cookies = await page.context().cookies().catch(() => []);
     const cfCookie = cookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
     if (cfCookie) {
+      // After getting clearance, try once more to get a Turnstile token (submit form may now be accessible)
+      await new Promise((r) => setTimeout(r, 1500));
+      const tokenAfterClearance = await extractTokenFromPage(page);
+      if (tokenAfterClearance) return { token: tokenAfterClearance };
       return { cfClearance: cfCookie.value };
     }
 
-    // 3. Check if page transitioned away from Cloudflare challenge
+    // 3. Check if page transitioned away from Cloudflare challenge page
     const title = await page.title().catch(() => '');
     const url = page.url();
     const elapsed = Date.now() - startTime;
@@ -551,6 +555,14 @@ async function solveWithNavigation(
       !title.toLowerCase().includes('just a moment') &&
       !url.includes('__cf_chl_rt_tk')
     ) {
+      // Page is no longer on Cloudflare challenge — check for token or real clearance
+      const tokenFinal = await extractTokenFromPage(page);
+      if (tokenFinal) return { token: tokenFinal };
+      // Re-check cookies since page navigation may have set them
+      const freshCookies = await page.context().cookies().catch(() => []);
+      const freshCf = freshCookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
+      if (freshCf) return { cfClearance: freshCf.value };
+      // Page cleared but no explicit cookie — return 'cleared' as sentinel (handled upstream)
       return { cfClearance: 'cleared' };
     }
 
