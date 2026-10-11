@@ -559,11 +559,10 @@ async function solveWithNavigation(
     const cookies = await page.context().cookies().catch(() => []);
     const cfCookie = cookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
     if (cfCookie) {
-      // After getting clearance, try once more to get a Turnstile token (submit form may now be accessible)
-      await new Promise((r) => setTimeout(r, 1500));
-      const tokenAfterClearance = await extractTokenFromPage(page);
-      if (tokenAfterClearance) return { token: tokenAfterClearance };
-      return { cfClearance: cfCookie.value };
+      if (!req.sitekey) {
+        return { cfClearance: cfCookie.value };
+      }
+      // When sitekey is present, clearance is step 1; continue in loop to get the widget token
     }
 
     // 3. Check if page transitioned away from Cloudflare challenge page
@@ -571,6 +570,7 @@ async function solveWithNavigation(
     const url = page.url();
     const elapsed = Date.now() - startTime;
     if (
+      !req.sitekey &&
       elapsed > 4000 &&
       !title.toLowerCase().includes('just a moment') &&
       !url.includes('__cf_chl_rt_tk')
@@ -588,7 +588,7 @@ async function solveWithNavigation(
 
     // 4. Intelligent pacing: wait at least 5s for challenge settling, and 4.5s between clicks
     const timeSinceLastClick = Date.now() - lastClickTime;
-    if (elapsed >= 5000 && timeSinceLastClick >= 4500) {
+    if (elapsed >= 4000 && timeSinceLastClick >= 4000) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         lastClickTime = Date.now();
@@ -599,10 +599,15 @@ async function solveWithNavigation(
   }
 
   // Final check before timeout
-  const finalCookies = await page.context().cookies().catch(() => []);
-  const finalCf = finalCookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
-  if (finalCf) {
-    return { cfClearance: finalCf.value };
+  const finalToken = await extractTokenFromPage(page);
+  if (finalToken) return { token: finalToken };
+
+  if (!req.sitekey) {
+    const finalCookies = await page.context().cookies().catch(() => []);
+    const finalCf = finalCookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
+    if (finalCf) {
+      return { cfClearance: finalCf.value };
+    }
   }
 
   return { error: `Turnstile challenge timed out after ${timeoutMs}ms without token` };

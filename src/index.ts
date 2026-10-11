@@ -173,12 +173,11 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 0;
     const hasCookies = !!(result.cookies && Object.keys(result.cookies).length > 0);
 
-    // For Codeforces (navigate mode), we accept clearance cookies even when a sitekey is present,
-    // because navigate mode bypasses the harness and returns cf_clearance instead of a Turnstile token.
-    // For harness mode (other sitekeys), a token is strictly required.
+    // If a sitekey is specified, a Turnstile token is strictly required for form submission.
+    // If NO sitekey is specified, this is a pure Cloudflare clearance request where cf_clearance cookies suffice.
     const isSuccess = result.ok && (
       hasToken ||
-      (isCfManagedKey && (hasClearance || hasCookies))
+      (!solveReq.sitekey && (hasClearance || hasCookies))
     );
 
     if (isSuccess) {
