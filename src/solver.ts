@@ -218,6 +218,26 @@ async function executeSingleSolveAttempt(
     });
 
     context = await browserManager.createContext(proxyConfig, req.userAgent);
+
+    if (req.cookies) {
+      try {
+        if (Array.isArray(req.cookies)) {
+          await context.addCookies(req.cookies);
+        } else if (typeof req.cookies === 'object') {
+          const domain = new URL(req.siteurl).hostname;
+          const formatted = Object.entries(req.cookies).map(([name, value]) => ({
+            name,
+            value: String(value),
+            domain: domain.startsWith('.') ? domain : `.${domain}`,
+            path: '/',
+          }));
+          await context.addCookies(formatted);
+        }
+      } catch (cookieErr) {
+        logWarn('Failed to add client cookies to context', { err: String(cookieErr) });
+      }
+    }
+
     page = await context.newPage();
 
     page.setDefaultTimeout(timeoutMs);

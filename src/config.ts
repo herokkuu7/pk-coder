@@ -75,17 +75,43 @@ export function parseProxy(proxyInput?: string | ProxyConfig): ProxyConfig | und
   return undefined;
 }
 
+export interface LogEntry {
+  time: string;
+  level: 'INFO' | 'WARN' | 'ERROR';
+  msg: string;
+  [key: string]: unknown;
+}
+
+export const logRingBuffer: LogEntry[] = [];
+
+function pushLog(entry: LogEntry): void {
+  logRingBuffer.push(entry);
+  if (logRingBuffer.length > 200) {
+    logRingBuffer.shift();
+  }
+}
+
+export function getLogs(limit = 100): LogEntry[] {
+  return logRingBuffer.slice(-limit);
+}
+
 export function logInfo(msg: string, meta?: Record<string, unknown>): void {
   const ts = new Date().toISOString();
-  process.stdout.write(JSON.stringify({ time: ts, level: 'INFO', msg, ...meta }) + '\n');
+  const entry: LogEntry = { time: ts, level: 'INFO', msg, ...meta };
+  pushLog(entry);
+  process.stdout.write(JSON.stringify(entry) + '\n');
 }
 
 export function logWarn(msg: string, meta?: Record<string, unknown>): void {
   const ts = new Date().toISOString();
-  process.stdout.write(JSON.stringify({ time: ts, level: 'WARN', msg, ...meta }) + '\n');
+  const entry: LogEntry = { time: ts, level: 'WARN', msg, ...meta };
+  pushLog(entry);
+  process.stdout.write(JSON.stringify(entry) + '\n');
 }
 
 export function logError(msg: string, meta?: Record<string, unknown>): void {
   const ts = new Date().toISOString();
-  process.stderr.write(JSON.stringify({ time: ts, level: 'ERROR', msg, ...meta }) + '\n');
+  const entry: LogEntry = { time: ts, level: 'ERROR', msg, ...meta };
+  pushLog(entry);
+  process.stderr.write(JSON.stringify(entry) + '\n');
 }

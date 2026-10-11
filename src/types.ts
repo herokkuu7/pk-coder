@@ -15,6 +15,7 @@ export interface SolveRequest {
   timeout?: number;
   mode?: SolverMode;
   userAgent?: string;
+  cookies?: Array<{ name: string; value: string; domain?: string; path?: string }> | Record<string, string>;
 }
 
 export interface SolveResult {

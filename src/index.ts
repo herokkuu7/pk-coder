@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import cors from 'cors';
-import { config, logInfo, logError } from './config';
+import { config, logInfo, logError, getLogs } from './config';
 import { solveTurnstile, solverQueue, solverStats } from './solver';
 import { proxyPool } from './proxyPool';
 import { BrowserManager } from './browser';
@@ -85,6 +85,20 @@ app.get('/stats', (_req: Request, res: Response) => {
 });
 
 /**
+ * In-memory log buffer endpoint for Render debugging and real-time telemetry.
+ */
+app.get('/logs', (req: Request, res: Response) => {
+  const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || '100', 10)));
+  const logs = getLogs(limit);
+  if (req.query.format === 'text') {
+    res.setHeader('content-type', 'text/plain; charset=utf-8');
+    res.status(200).send(logs.map((l) => `[${l.time}] [${l.level}] ${l.msg} ${JSON.stringify(l)}`).join('\n'));
+    return;
+  }
+  res.status(200).json({ ok: true, count: logs.length, logs });
+});
+
+/**
  * Primary Turnstile solving endpoint.
  *
  * Expected body:
@@ -113,7 +127,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const { siteurl, sitekey, action, cdata, proxy, timeout, mode, userAgent } = body;
+  const { siteurl, sitekey, action, cdata, proxy, timeout, mode, userAgent, cookies } = body;
 
   if (!siteurl || typeof siteurl !== 'string') {
     res.status(400).json({ ok: false, error: 'Missing or invalid "siteurl" parameter' });
@@ -150,6 +164,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
       timeout: typeof timeout === 'number' && timeout > 0 ? timeout : undefined,
       mode: effectiveMode,
       userAgent: typeof userAgent === 'string' && userAgent.trim() ? userAgent.trim() : undefined,
+      cookies: cookies,
     };
 
     const result = await solveTurnstile(solveReq);
