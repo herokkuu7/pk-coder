@@ -1,0 +1,31 @@
+{
+  "name": "cpsolver",
+  "version": "1.0.0",
+  "description": "Ultra-lightweight self-hosted Cloudflare Turnstile solver microservice optimized for Render free tier (512MB RAM)",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "dev": "tsx watch src/index.ts",
+    "test": "tsx test/sanity.test.ts",
+    "test:dist": "node dist/test/sanity.test.js",
+    "test:solve": "tsx test/test-solve.ts"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "patchright": "^1.63.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
