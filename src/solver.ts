@@ -522,27 +522,49 @@ async function solveWithNavigation(
   });
 
   const deadline = startTime + timeoutMs;
-  let hasAttemptedClick = false;
+  let lastClickTime = 0;
 
   while (Date.now() < deadline) {
+    // 1. Check for resolved token
     const token = await extractTokenFromPage(page);
     if (token) return { token };
 
-    // Check if cf_clearance was issued
+    // 2. Check if cf_clearance was issued
     const cookies = await page.context().cookies().catch(() => []);
     const cfCookie = cookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
-    if (!req.sitekey && cfCookie) {
+    if (cfCookie) {
       return { cfClearance: cfCookie.value };
     }
 
-    if (!hasAttemptedClick || Math.random() < 0.4) {
+    // 3. Check if page transitioned away from Cloudflare challenge
+    const title = await page.title().catch(() => '');
+    const url = page.url();
+    const elapsed = Date.now() - startTime;
+    if (
+      elapsed > 4000 &&
+      !title.toLowerCase().includes('just a moment') &&
+      !url.includes('__cf_chl_rt_tk')
+    ) {
+      return { cfClearance: 'cleared' };
+    }
+
+    // 4. Intelligent pacing: wait at least 5s for challenge settling, and 4.5s between clicks
+    const timeSinceLastClick = Date.now() - lastClickTime;
+    if (elapsed >= 5000 && timeSinceLastClick >= 4500) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
-        hasAttemptedClick = true;
+        lastClickTime = Date.now();
       }
     }
 
     await new Promise((r) => setTimeout(r, 400));
+  }
+
+  // Final check before timeout
+  const finalCookies = await page.context().cookies().catch(() => []);
+  const finalCf = finalCookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
+  if (finalCf) {
+    return { cfClearance: finalCf.value };
   }
 
   return { error: `Turnstile challenge timed out after ${timeoutMs}ms without token` };

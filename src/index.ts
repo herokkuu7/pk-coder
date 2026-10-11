@@ -136,7 +136,10 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const effectiveMode = mode === 'navigate' || !sitekey ? 'navigate' : 'harness';
+  const effectiveMode =
+    mode === 'navigate' || !sitekey || siteurl.includes('codeforces.com')
+      ? 'navigate'
+      : (mode || 'harness');
 
   try {
     const solveReq: SolveRequest = {

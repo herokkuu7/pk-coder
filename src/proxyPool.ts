@@ -143,9 +143,9 @@ export class ProxyPoolManager {
 
   public reloadFromEnv(): void {
     const raw =
-      process.env.PROXY_URL ||
-      process.env.PROXIES ||
-      process.env.PROXY_LIST ||
+      process.env.PROXIES?.trim() ||
+      process.env.PROXY_LIST?.trim() ||
+      process.env.PROXY_URL?.trim() ||
       '';
 
     const parsed = parseProxyList(raw);
