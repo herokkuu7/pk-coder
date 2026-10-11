@@ -138,7 +138,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
 
   const isCfManagedKey = sitekey === '0x4AAAAAAADnPIDROrmt1Wwj' || siteurl.includes('codeforces.com');
   const effectiveMode: SolverMode =
-    mode ? mode : (isCfManagedKey ? 'navigate' : (sitekey ? 'harness' : 'navigate'));
+    isCfManagedKey ? 'navigate' : (mode ? mode : (sitekey ? 'harness' : 'navigate'));
 
   try {
     const solveReq: SolveRequest = {
