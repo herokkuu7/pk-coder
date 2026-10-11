@@ -252,7 +252,12 @@ async function executeSingleSolveAttempt(
 
     const durationMs = Date.now() - attemptStartTime;
 
-    if (stepResult.token || stepResult.cfClearance || cfClearance) {
+    const requiresToken = mode === 'harness' || !!req.sitekey;
+    const isSuccessful = requiresToken
+      ? !!stepResult.token
+      : !!(stepResult.token || stepResult.cfClearance || cfClearance);
+
+    if (isSuccessful) {
       logInfo('Turnstile solved successfully', {
         siteurl: req.siteurl,
         durationMs,
@@ -273,7 +278,7 @@ async function executeSingleSolveAttempt(
     return {
       ok: false,
       durationMs,
-      error: stepResult.error || `Turnstile error: challenge timed out after ${timeoutMs}ms without token`,
+      error: stepResult.error || (requiresToken && !stepResult.token ? 'Turnstile token not resolved' : `Turnstile error: challenge timed out after ${timeoutMs}ms without token`),
       modeUsed: mode,
     };
   } catch (err) {

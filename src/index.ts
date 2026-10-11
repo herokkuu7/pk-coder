@@ -5,7 +5,7 @@ import { solveTurnstile, solverQueue, solverStats } from './solver';
 import { proxyPool } from './proxyPool';
 import { BrowserManager } from './browser';
 import { QueueFullError } from './queue';
-import type { SolveRequest, HealthResponse } from './types';
+import type { SolveRequest, HealthResponse, SolverMode } from './types';
 
 export const app = express();
 
@@ -136,10 +136,8 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const effectiveMode =
-    mode === 'navigate' || !sitekey || siteurl.includes('codeforces.com')
-      ? 'navigate'
-      : (mode || 'harness');
+  const effectiveMode: SolverMode =
+    mode ? mode : (sitekey ? 'harness' : 'navigate');
 
   try {
     const solveReq: SolveRequest = {
@@ -155,7 +153,12 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
 
     const result = await solveTurnstile(solveReq);
 
-    if (result.ok && (result.token || result.cfClearance || (result.cookies && Object.keys(result.cookies).length > 0))) {
+    const requiresToken = effectiveMode === 'harness' || !!sitekey;
+    const isSuccess = requiresToken
+      ? (result.ok && !!result.token)
+      : (result.ok && (!!result.token || !!result.cfClearance || (!!result.cookies && Object.keys(result.cookies).length > 0)));
+
+    if (isSuccess) {
       res.status(200).json({
         ok: true,
         token: result.token,
@@ -171,7 +174,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     const statusCode = result.error?.includes('timed out') ? 408 : 500;
     res.status(statusCode).json({
       ok: false,
-      error: result.error || 'Failed to solve Turnstile / Cloudflare challenge',
+      error: result.error || (requiresToken && !result.token ? 'Turnstile token not resolved' : 'Failed to solve Turnstile / Cloudflare challenge'),
       durationMs: result.durationMs,
       modeUsed: result.modeUsed,
       proxyUsed: result.proxyUsed,
