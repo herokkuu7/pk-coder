@@ -276,9 +276,12 @@ async function executeSingleSolveAttempt(
     const hasClearance = !!(stepResult.cfClearance || cfClearance);
     const hasCookies = !!(cookiesRecord && Object.keys(cookiesRecord).some((k) => k.toLowerCase().startsWith('cf_')));
 
-    // When sitekey is requested (e.g. form Turnstile widget), token is strictly required.
-    // When NO sitekey is requested (pure Cloudflare interstitial clearance), clearance cookies suffice.
-    const isSuccessful = req.sitekey
+    // Codeforces uses managed interstitial Turnstile; clearance cookies bypass the challenge.
+    const isCodeforces = req.siteurl.includes('codeforces.com');
+
+    // When sitekey is requested for generic sites, token is strictly required.
+    // For Codeforces, clearance cookies or token both succeed.
+    const isSuccessful = (req.sitekey && !isCodeforces)
       ? hasValidToken
       : (hasValidToken || hasClearance || hasCookies);
 
@@ -568,18 +571,19 @@ async function solveWithNavigation(
     const cookies = await page.context().cookies().catch(() => []);
     const cfCookie = cookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
     if (cfCookie) {
-      if (!req.sitekey) {
+      if (!req.sitekey || req.siteurl.includes('codeforces.com')) {
         return { cfClearance: cfCookie.value };
       }
-      // When sitekey is present, clearance is step 1; continue in loop to get the widget token
+      // When sitekey is present on third-party sites, clearance is step 1; continue in loop to get the widget token
     }
 
     // 3. Check if page transitioned away from Cloudflare challenge page
     const title = await page.title().catch(() => '');
     const url = page.url();
     const elapsed = Date.now() - startTime;
+    const isCodeforces = req.siteurl.includes('codeforces.com');
     if (
-      !req.sitekey &&
+      (!req.sitekey || isCodeforces) &&
       elapsed > 4000 &&
       !title.toLowerCase().includes('just a moment') &&
       !url.includes('__cf_chl_rt_tk')
@@ -611,7 +615,7 @@ async function solveWithNavigation(
   const finalToken = await extractTokenFromPage(page);
   if (finalToken) return { token: finalToken };
 
-  if (!req.sitekey) {
+  if (!req.sitekey || req.siteurl.includes('codeforces.com')) {
     const finalCookies = await page.context().cookies().catch(() => []);
     const finalCf = finalCookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
     if (finalCf) {
@@ -619,5 +623,5 @@ async function solveWithNavigation(
     }
   }
 
-  return { error: `Turnstile challenge timed out after ${timeoutMs}ms without token` };
+  return { error: `Turnstile challenge timed out after ${timeoutMs}ms without token or clearance` };
 }

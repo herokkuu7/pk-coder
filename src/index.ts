@@ -180,11 +180,14 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 0;
     const hasCookies = !!(result.cookies && Object.keys(result.cookies).length > 0);
 
-    // If a sitekey is specified, a Turnstile token is strictly required for form submission.
-    // If NO sitekey is specified, this is a pure Cloudflare clearance request where cf_clearance cookies suffice.
+    // Codeforces Turnstile key bypasses the challenge via clearance cookies.
+    const isCodeforces = solveReq.siteurl.includes('codeforces.com') || solveReq.sitekey === '0x4AAAAAAADnPIDROrmt1Wwj';
+
+    // If a sitekey is specified on generic sites, a Turnstile token is strictly required.
+    // For Codeforces, clearance cookies or token both constitute a successful solve.
     const isSuccess = result.ok && (
       hasToken ||
-      (!solveReq.sitekey && (hasClearance || hasCookies))
+      ((!solveReq.sitekey || isCodeforces) && (hasClearance || hasCookies))
     );
 
     if (isSuccess) {
