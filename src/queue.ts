@@ -70,13 +70,21 @@ export class ConcurrencyQueue {
     this.activeCount++;
 
     (async () => {
+      let timeoutTimer: NodeJS.Timeout | null = null;
       try {
-        const result = await item.task();
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutTimer = setTimeout(() => {
+            reject(new Error('Task execution timed out after 40s in concurrency queue'));
+          }, 40_000);
+        });
+
+        const result = await Promise.race([item.task(), timeoutPromise]);
         item.resolve(result);
       } catch (err) {
         item.reject(err);
       } finally {
-        this.activeCount--;
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        this.activeCount = Math.max(0, this.activeCount - 1);
         this.totalProcessed++;
         this.dequeue();
       }

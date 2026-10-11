@@ -154,9 +154,12 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
 
     const result = await solveTurnstile(solveReq);
 
-    const isSuccess =
-      result.ok &&
-      (!!result.token || !!result.cfClearance || (!!result.cookies && Object.keys(result.cookies).length > 0));
+    const hasToken = typeof result.token === 'string' && result.token.trim().length > 10;
+    const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 0;
+    const hasCookies = result.cookies && Object.keys(result.cookies).length > 0;
+
+    // For Turnstile widget requests (sitekey present), a token is strictly required
+    const isSuccess = result.ok && (sitekey ? hasToken : (hasToken || hasClearance || hasCookies));
 
     if (isSuccess) {
       res.status(200).json({
@@ -171,10 +174,10 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const statusCode = result.error?.includes('timed out') ? 408 : 500;
+    const statusCode = result.error?.includes('timed out') ? 408 : 422;
     res.status(statusCode).json({
       ok: false,
-      error: result.error || 'Failed to solve Turnstile / Cloudflare challenge',
+      error: result.error || (sitekey ? 'No Turnstile token issued for sitekey' : 'Failed to solve challenge'),
       durationMs: result.durationMs,
       modeUsed: result.modeUsed,
       proxyUsed: result.proxyUsed,

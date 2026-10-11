@@ -120,6 +120,28 @@ export async function applyStealthScripts(context: BrowserContext): Promise<void
         } catch {}
       });
     } catch {}
+
+    // 4. Mock WebGL vendor & renderer to hide SwiftShader/software rasterizer flags
+    try {
+      const spoofVendor = 'Google Inc. (NVIDIA)';
+      const spoofRenderer = 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+      if (typeof WebGLRenderingContext !== 'undefined') {
+        const origGetParam = WebGLRenderingContext.prototype.getParameter;
+        WebGLRenderingContext.prototype.getParameter = function(param: number) {
+          if (param === 37445) return spoofVendor;
+          if (param === 37446) return spoofRenderer;
+          return origGetParam.apply(this, [param]);
+        };
+      }
+      if (typeof WebGL2RenderingContext !== 'undefined') {
+        const origGetParam2 = WebGL2RenderingContext.prototype.getParameter;
+        WebGL2RenderingContext.prototype.getParameter = function(param: number) {
+          if (param === 37445) return spoofVendor;
+          if (param === 37446) return spoofRenderer;
+          return origGetParam2.apply(this, [param]);
+        };
+      }
+    } catch {}
   }).catch(() => undefined);
 }
 
