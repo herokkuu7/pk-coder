@@ -24,6 +24,7 @@ export interface SolveResult {
   durationMs: number;
   error?: string;
   modeUsed?: SolverMode;
+  proxyUsed?: string;
 }
 
 export interface SolverStats {
@@ -55,5 +56,10 @@ export interface HealthResponse {
   browser: {
     isAlive: boolean;
     solvesSinceRestart: number;
+  };
+  proxyPool?: {
+    total: number;
+    activeIndex: number;
+    activeProxy: string | null;
   };
 }

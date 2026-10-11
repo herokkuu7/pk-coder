@@ -2,6 +2,7 @@ import express, { type Request, type Response } from 'express';
 import cors from 'cors';
 import { config, logInfo, logError } from './config';
 import { solveTurnstile, solverQueue, solverStats } from './solver';
+import { proxyPool } from './proxyPool';
 import { BrowserManager } from './browser';
 import { QueueFullError } from './queue';
 import type { SolveRequest, HealthResponse } from './types';
@@ -37,9 +38,37 @@ app.get(['/health', '/'], (_req: Request, res: Response) => {
       isAlive: browserManager.isAlive,
       solvesSinceRestart: browserManager.solvesSinceRestart,
     },
+    proxyPool: {
+      total: proxyPool.size,
+      activeIndex: proxyPool.currentIndex,
+      activeProxy: proxyPool.getStatus().activeMasked,
+    },
   };
 
   res.status(200).json(health);
+});
+
+/**
+ * Proxy pool telemetry endpoint.
+ */
+app.get('/proxies', (_req: Request, res: Response) => {
+  res.status(200).json(proxyPool.getStatus());
+});
+
+/**
+ * Manually rotate to next proxy in pool.
+ */
+app.post('/proxies/rotate', (_req: Request, res: Response) => {
+  const rotated = proxyPool.rotateToNext();
+  res.status(200).json({ ok: true, activeIndex: rotated.index, activeProxy: rotated.masked });
+});
+
+/**
+ * Reset proxy pool index to first proxy (index 0).
+ */
+app.post('/proxies/reset', (_req: Request, res: Response) => {
+  proxyPool.resetToFirst();
+  res.status(200).json({ ok: true, activeIndex: 0, activeProxy: proxyPool.getStatus().activeMasked });
 });
 
 /**
@@ -130,6 +159,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
         cfClearance: result.cfClearance,
         durationMs: result.durationMs,
         modeUsed: result.modeUsed,
+        proxyUsed: result.proxyUsed,
       });
       return;
     }
@@ -140,6 +170,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
       error: result.error || 'Failed to solve Turnstile / Cloudflare challenge',
       durationMs: result.durationMs,
       modeUsed: result.modeUsed,
+      proxyUsed: result.proxyUsed,
     });
   } catch (err) {
     if (err instanceof QueueFullError) {

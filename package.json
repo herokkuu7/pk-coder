@@ -10,6 +10,7 @@
     "dev": "tsx watch src/index.ts",
     "test": "tsx test/sanity.test.ts",
     "test:dist": "node dist/test/sanity.test.js",
+    "test:pool": "tsx test/proxyPool.test.ts",
     "test:solve": "tsx test/test-solve.ts"
   },
   "dependencies": {

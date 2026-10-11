@@ -41,7 +41,10 @@ export function parseProxy(proxyInput?: string | ProxyConfig): ProxyConfig | und
     }
 
     if (typeof proxyInput === 'string' && proxyInput.trim()) {
-      const raw = proxyInput.trim();
+      let raw = proxyInput.trim();
+      if (raw.includes(',')) {
+        raw = (raw.split(',')[0] ?? '').trim();
+      }
       try {
         const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(raw);
         const url = new URL(hasScheme ? raw : `http://${raw}`);

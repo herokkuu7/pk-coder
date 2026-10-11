@@ -23,9 +23,11 @@ It is specifically engineered to run reliably on a **free Render Web Service wit
 - **Dual Solving Strategies**:
   - **Synthetic Harness Mode (`mode: 'harness'`)**: Intercepts the target URL's document request and serves a minimal Turnstile HTML host page under the exact target origin. Super-fast, minimal bandwidth.
   - **Direct Navigation Mode (`mode: 'navigate'`)**: Visits the real page directly when full website session context is required, returning both Turnstile tokens and clearance cookies (`cf_clearance`).
-- **Flexible Proxy Support**:
-  - Supports static residential or datacenter proxies via environment variables (`PROXY_URL` or `PROXY_SERVER`, `PROXY_USERNAME`, `PROXY_PASSWORD`).
-  - Supports per-request proxy overrides in the request body.
+- **Smart Proxy Pool & Sequential Failover**:
+  - Automatically loads single or comma-separated proxy lists from `PROXY_URL` or `PROXIES`.
+  - Sequential rotation: begins solving with the current active IP; if an IP fails (e.g., sticky peer offline), sequentially fails over to the next candidate until all proxies have been attempted.
+  - Automatically preserves the working IP on success for subsequent requests.
+  - Exposes `/proxies`, `/proxies/rotate`, and `/proxies/reset` endpoints for real-time observability and pool management.
 - **Drop-in Compatibility**:
   - Standard REST contract matching `src/codeforces/browserForm.ts` (`data.token`, `data.cookies`).
   - Health check endpoint (`GET /health` and `GET /`) for Render uptime monitoring.
@@ -150,7 +152,8 @@ Create a `.env` file based on `.env.example`:
 | `MAX_SOLVES_BEFORE_RECYCLE` | `50` | Recycles the browser process after this many solves to prevent memory bloat. |
 | `MAX_RSS_MB` | `380` | Process RSS threshold to trigger automatic browser recycling. |
 | `HEADLESS` | `true` | Runs Chromium in headless mode. Set to `false` for local visual debugging. |
-| `PROXY_URL` | *unset* | Default proxy URL, e.g. `http://user:pass@proxy.example.com:8080`. |
+| `PROXY_URL` | *unset* | Default proxy URL, e.g. `http://user:pass@proxy.example.com:8080`. Supports comma-separated list of multiple proxies. |
+| `PROXIES` | *unset* | Comma-separated or newline-separated list of proxies for automatic rotation and sequential failover. |
 | `PROXY_SERVER` | *unset* | Alternate proxy server host without credentials. |
 | `PROXY_USERNAME` | *unset* | Username for `PROXY_SERVER`. |
 | `PROXY_PASSWORD` | *unset* | Password for `PROXY_SERVER`. |

@@ -2,8 +2,9 @@ import type { Page, BrowserContext } from 'patchright';
 import { BrowserManager } from './browser';
 import { ConcurrencyQueue } from './queue';
 import { config, logInfo, logWarn, parseProxy } from './config';
+import { proxyPool, maskProxy } from './proxyPool';
 import { interactWithTurnstileCheckbox } from './stealth';
-import type { SolveRequest, SolveResult, SolverStats, SolverMode } from './types';
+import type { SolveRequest, SolveResult, SolverStats, SolverMode, ProxyConfig } from './types';
 
 function escapeHtml(str: string): string {
   return str
@@ -193,115 +194,244 @@ interface StepSolveResult {
  * Solves Cloudflare Turnstile for a given target siteurl and sitekey.
  * Runs inside the ConcurrencyQueue to protect the 512MB RAM ceiling on Render.
  */
+/**
+ * Executes a single Turnstile solve attempt under a specific browser context and proxy configuration.
+ */
+async function executeSingleSolveAttempt(
+  req: SolveRequest,
+  proxyConfig: ProxyConfig | undefined,
+  timeoutMs: number,
+  mode: SolverMode,
+  attemptStartTime: number,
+): Promise<SolveResult> {
+  const browserManager = BrowserManager.getInstance();
+  let context: BrowserContext | null = null;
+  let page: Page | null = null;
+
+  try {
+    logInfo('Starting Turnstile solve attempt', {
+      siteurl: req.siteurl,
+      sitekey: req.sitekey,
+      mode,
+      hasProxy: !!proxyConfig?.server,
+      proxyServer: proxyConfig?.server,
+    });
+
+    context = await browserManager.createContext(proxyConfig);
+    page = await context.newPage();
+
+    page.setDefaultTimeout(timeoutMs);
+
+    let stepResult: StepSolveResult;
+
+    if (mode === 'harness' && req.sitekey) {
+      stepResult = await solveWithHarness(page, req, timeoutMs, attemptStartTime);
+      if (stepResult.error?.includes('600010')) {
+        logInfo('Harness mode encountered 600010 (interstitial key), falling back to navigation mode', { siteurl: req.siteurl });
+        stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime);
+      }
+    } else {
+      stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime);
+    }
+
+    // Extract all cookies from context
+    let cookiesRecord: Record<string, string> | undefined;
+    let cfClearance: string | undefined;
+    try {
+      const cookies = await context.cookies();
+      if (cookies.length > 0) {
+        cookiesRecord = {};
+        for (const c of cookies) {
+          cookiesRecord[c.name] = c.value;
+          if (c.name === 'cf_clearance' && c.value.length > 5) {
+            cfClearance = c.value;
+          }
+        }
+      }
+    } catch {}
+
+    const durationMs = Date.now() - attemptStartTime;
+
+    if (stepResult.token || stepResult.cfClearance || cfClearance) {
+      logInfo('Turnstile solved successfully', {
+        siteurl: req.siteurl,
+        durationMs,
+        tokenLength: stepResult.token?.length,
+        hasClearance: !!(stepResult.cfClearance || cfClearance),
+      });
+
+      return {
+        ok: true,
+        token: stepResult.token,
+        cookies: cookiesRecord,
+        cfClearance: stepResult.cfClearance || cfClearance,
+        durationMs,
+        modeUsed: mode,
+      };
+    }
+
+    return {
+      ok: false,
+      durationMs,
+      error: stepResult.error || `Turnstile error: challenge timed out after ${timeoutMs}ms without token`,
+      modeUsed: mode,
+    };
+  } catch (err) {
+    const durationMs = Date.now() - attemptStartTime;
+    const message = err instanceof Error ? err.message : String(err);
+
+    logWarn('Turnstile solve attempt failed with error', {
+      siteurl: req.siteurl,
+      durationMs,
+      error: message,
+    });
+
+    return {
+      ok: false,
+      durationMs,
+      error: message,
+      modeUsed: mode,
+    };
+  } finally {
+    if (page) {
+      await page.close().catch(() => {});
+    }
+    if (context) {
+      await context.close().catch(() => {});
+    }
+    await browserManager.notifySolveCompleted(solverQueue.active);
+  }
+}
+
+/**
+ * Solves Cloudflare Turnstile for a given target siteurl and sitekey.
+ * Runs inside ConcurrencyQueue and performs sequential proxy failover across the pool
+ * (from the first working IP till the end) if multiple proxies are configured.
+ */
 export async function solveTurnstile(req: SolveRequest): Promise<SolveResult> {
-  const startTime = Date.now();
-  const timeoutMs = req.timeout ?? config.defaultTimeoutMs;
-  const proxyConfig = parseProxy(req.proxy);
+  const overallStartTime = Date.now();
+  const totalTimeoutMs = req.timeout ?? config.defaultTimeoutMs;
   const mode: SolverMode = req.mode ?? 'harness';
 
   return solverQueue.run(async () => {
-    const browserManager = BrowserManager.getInstance();
-    let context: BrowserContext | null = null;
-    let page: Page | null = null;
-
-    try {
-      logInfo('Starting Turnstile solve', {
-        siteurl: req.siteurl,
-        sitekey: req.sitekey,
-        mode,
-        hasProxy: !!proxyConfig?.server,
-      });
-
-      context = await browserManager.createContext(proxyConfig);
-      page = await context.newPage();
-
-      // Configure navigation timeout
-      page.setDefaultTimeout(timeoutMs);
-
-      let stepResult: StepSolveResult;
-
-      if (mode === 'harness' && req.sitekey) {
-        stepResult = await solveWithHarness(page, req, timeoutMs, startTime);
-        if (stepResult.error?.includes('600010')) {
-          logInfo('Harness mode encountered 600010 (interstitial key), falling back to navigation mode', { siteurl: req.siteurl });
-          stepResult = await solveWithNavigation(page, req, timeoutMs, startTime);
-        }
+    // 1. Explicit per-request proxy override (or explicit 'direct')
+    if (req.proxy && typeof req.proxy === 'string' && req.proxy !== 'auto') {
+      const explicitProxy = parseProxy(req.proxy);
+      const res = await executeSingleSolveAttempt(req, explicitProxy, totalTimeoutMs, mode, overallStartTime);
+      res.durationMs = Date.now() - overallStartTime;
+      if (res.ok) {
+        solverStats.recordSuccess(res.durationMs);
       } else {
-        stepResult = await solveWithNavigation(page, req, timeoutMs, startTime);
+        solverStats.recordFailure();
       }
+      return res;
+    }
 
-      // Extract all cookies from context
-      let cookiesRecord: Record<string, string> | undefined;
-      let cfClearance: string | undefined;
-      try {
-        const cookies = await context.cookies();
-        if (cookies.length > 0) {
-          cookiesRecord = {};
-          for (const c of cookies) {
-            cookiesRecord[c.name] = c.value;
-            if (c.name === 'cf_clearance' && c.value.length > 5) {
-              cfClearance = c.value;
-            }
-          }
-        }
-      } catch {}
+    if (req.proxy && typeof req.proxy === 'object') {
+      const explicitProxy = parseProxy(req.proxy);
+      const res = await executeSingleSolveAttempt(req, explicitProxy, totalTimeoutMs, mode, overallStartTime);
+      res.durationMs = Date.now() - overallStartTime;
+      if (res.ok) {
+        solverStats.recordSuccess(res.durationMs);
+      } else {
+        solverStats.recordFailure();
+      }
+      return res;
+    }
 
-      const durationMs = Date.now() - startTime;
+    // 2. If no proxies in pool, run with default proxy config or direct
+    if (proxyPool.size === 0) {
+      const defaultProxy = parseProxy();
+      const res = await executeSingleSolveAttempt(req, defaultProxy, totalTimeoutMs, mode, overallStartTime);
+      res.durationMs = Date.now() - overallStartTime;
+      if (res.ok) {
+        solverStats.recordSuccess(res.durationMs);
+      } else {
+        solverStats.recordFailure();
+      }
+      return res;
+    }
 
-      if (stepResult.token || stepResult.cfClearance || cfClearance) {
-        logInfo('Turnstile solved successfully', {
-          siteurl: req.siteurl,
-          durationMs,
-          tokenLength: stepResult.token?.length,
-          hasClearance: !!(stepResult.cfClearance || cfClearance),
+    // 3. Sequential rotation across proxy pool (starts at current working proxy and fails over till end)
+    const startIndex = proxyPool.currentIndex;
+    let lastResult: SolveResult | null = null;
+
+    for (let attempt = 0; attempt < proxyPool.size; attempt++) {
+      const candidateIndex = (startIndex + attempt) % proxyPool.size;
+      const candidateConfig = proxyPool.getProxyAt(candidateIndex);
+      const candidateRaw = proxyPool.getRawAt(candidateIndex) || '';
+      const masked = maskProxy(candidateRaw);
+
+      const elapsed = Date.now() - overallStartTime;
+      const remainingTime = totalTimeoutMs - elapsed;
+
+      // Abort failover if insufficient time left for a browser solve
+      if (remainingTime < 5000 && attempt > 0) {
+        logWarn('Insufficient time remaining for next proxy in pool, aborting failover', {
+          remainingTime,
+          attempt,
+          totalInPool: proxyPool.size,
         });
-
-        solverStats.recordSuccess(durationMs);
-        return {
-          ok: true,
-          token: stepResult.token,
-          cookies: cookiesRecord,
-          cfClearance: stepResult.cfClearance || cfClearance,
-          durationMs,
-          modeUsed: mode,
-        };
+        break;
       }
 
-      solverStats.recordFailure();
-      return {
-        ok: false,
-        durationMs,
-        error: stepResult.error || `Turnstile error: challenge timed out after ${timeoutMs}ms without token`,
-        modeUsed: mode,
-      };
-    } catch (err) {
-      const durationMs = Date.now() - startTime;
-      solverStats.recordFailure();
-      const message = err instanceof Error ? err.message : String(err);
+      // Proportional budget per proxy candidate
+      const candidateBudget = Math.min(
+        remainingTime,
+        Math.max(15000, Math.floor(remainingTime / (proxyPool.size - attempt))),
+      );
 
-      logWarn('Turnstile solve failed with error', {
-        siteurl: req.siteurl,
-        durationMs,
-        error: message,
+      logInfo('Attempting Turnstile solve with pool proxy', {
+        proxyIndex: candidateIndex,
+        proxy: masked,
+        attempt: attempt + 1,
+        totalInPool: proxyPool.size,
+        timeoutMs: candidateBudget,
       });
 
-      return {
-        ok: false,
-        durationMs,
-        error: message,
-        modeUsed: mode,
-      };
-    } finally {
-      if (page) {
-        await page.close().catch(() => {});
+      const attemptStartTime = Date.now();
+      const result = await executeSingleSolveAttempt(
+        req,
+        candidateConfig,
+        candidateBudget,
+        mode,
+        attemptStartTime,
+      );
+
+      result.proxyUsed = masked;
+
+      if (result.ok) {
+        proxyPool.markSuccess(candidateIndex);
+        const totalDuration = Date.now() - overallStartTime;
+        result.durationMs = totalDuration;
+        solverStats.recordSuccess(totalDuration);
+        return result;
       }
-      if (context) {
-        await context.close().catch(() => {});
-      }
-      await browserManager.notifySolveCompleted(solverQueue.active);
+
+      // Record failure and rotate pointer to next proxy
+      proxyPool.markFailure(candidateIndex, result.error);
+      lastResult = result;
+
+      logWarn(`Proxy candidate #${candidateIndex} (${masked}) failed. Rotating to next candidate in pool...`, {
+        error: result.error,
+        nextCandidate: (candidateIndex + 1) % proxyPool.size,
+      });
     }
+
+    // All pool proxies failed
+    const totalDuration = Date.now() - overallStartTime;
+    solverStats.recordFailure();
+    return (
+      lastResult || {
+        ok: false,
+        durationMs: totalDuration,
+        error: `All ${proxyPool.size} proxies in pool failed to solve challenge`,
+        modeUsed: mode,
+      }
+    );
   });
 }
+
 
 /**
  * Harness Mode: Intercepts document request to siteurl and serves lightweight Turnstile HTML.
