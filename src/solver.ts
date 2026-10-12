@@ -484,6 +484,27 @@ async function solveWithHarness(
     return route.fallback();
   });
 
+  let networkCapturedToken: string | null = null;
+
+  page.on('response', async (res) => {
+    const url = res.url();
+    if (url.includes('challenge-platform') || url.includes('challenges.cloudflare.com')) {
+      try {
+        const text = await res.text().catch(() => '');
+        if (text && (text.includes('"token"') || text.includes('"turnstileToken"'))) {
+          const match = text.match(/"(?:turnstile)?Token"\s*:\s*"([^"]+)"/);
+          if (match && match[1] && match[1].length > 20) {
+            logInfo('Turnstile token intercepted directly from challenge network response!', {
+              tokenLength: match[1].length,
+              url: url.slice(0, 100),
+            });
+            networkCapturedToken = match[1];
+          }
+        }
+      } catch {}
+    }
+  });
+
   page.on('requestfailed', (r) => {
     logWarn('Harness resource load failed', { url: r.url().slice(0, 120), error: r.failure()?.errorText });
   });
@@ -506,7 +527,10 @@ async function solveWithHarness(
   await page.waitForTimeout(2000).catch(() => {});
 
   while (Date.now() < deadline) {
-    // 1. Check for resolved token
+    // 0. Check network intercepted token first
+    if (networkCapturedToken) return { token: networkCapturedToken };
+
+    // 1. Check for resolved token on page
     const token = await extractTokenFromPage(page);
     if (token) return { token };
 
@@ -522,9 +546,9 @@ async function solveWithHarness(
     }
 
     // 3. Try interactive checkbox click: click once after initial settle,
-    // and debounce re-clicks by at least 8 seconds if no token has arrived yet.
+    // and wait at least 25 seconds before any retry so Cloudflare proof-of-work is not interrupted.
     const timeSinceLastClick = Date.now() - lastClickTime;
-    if (!clickAttempted || timeSinceLastClick >= 8000) {
+    if (!clickAttempted || timeSinceLastClick >= 25000) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         clickAttempted = true;
