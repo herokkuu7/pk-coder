@@ -387,11 +387,13 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
         break;
       }
 
-      // Budget per candidate: ensure candidate gets at least 32s if remainingTime allows,
-      // so Cloudflare clearance (which takes 20-28s on residential proxies) is not cut off prematurely.
+      // Budget per candidate: ensure candidate gets up to 45s if remainingTime allows,
+      // so Cloudflare clearance / Turnstile on high-latency residential proxies has sufficient time.
       const candidateBudget = Math.min(
         remainingTime,
-        Math.max(32000, Math.floor(remainingTime / Math.max(1, proxyPool.size - attempt))),
+        attempt === proxyPool.size - 1
+          ? remainingTime
+          : Math.max(45000, remainingTime - 25000),
       );
 
       logInfo('Attempting Turnstile solve with pool proxy', {
@@ -480,6 +482,15 @@ async function solveWithHarness(
     }
 
     return route.fallback();
+  });
+
+  page.on('requestfailed', (r) => {
+    logWarn('Harness resource load failed', { url: r.url().slice(0, 120), error: r.failure()?.errorText });
+  });
+  page.on('console', (msg) => {
+    if (msg.type() === 'error' || msg.type() === 'warning') {
+      logWarn('Harness page console', { type: msg.type(), text: msg.text().slice(0, 200) });
+    }
   });
 
   await page.goto(targetUrl, {
