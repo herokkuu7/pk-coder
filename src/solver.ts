@@ -125,18 +125,6 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
         }
       } catch (e) {}
     });
-    function ensureTurnstileLoaded() {
-      if (!window.turnstile && !window.__turnstileToken) {
-        var existing = document.querySelector('script[src*="turnstile/v0/api.js"]');
-        if (existing) existing.remove();
-        var s = document.createElement('script');
-        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
-        s.async = true;
-        document.head.appendChild(s);
-      }
-    }
-    setTimeout(ensureTurnstileLoaded, 5000);
-    setTimeout(ensureTurnstileLoaded, 12000);
   </script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
@@ -223,6 +211,11 @@ async function extractTokenFromPage(page: Page): Promise<string | null> {
   try {
     const val = await page.locator('input[name="cf-turnstile-response"]').inputValue({ timeout: 150 });
     if (val && val.length > 5) return val;
+  } catch {}
+
+  try {
+    const val2 = await page.locator('input[name="turnstileToken"]').inputValue({ timeout: 150 });
+    if (val2 && val2.length > 5) return val2;
   } catch {}
 
   return null;
