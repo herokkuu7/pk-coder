@@ -109,10 +109,14 @@ export class BrowserManager {
         }
       : undefined;
 
-    const userAgent =
+    let userAgent =
       (overrideUserAgent && overrideUserAgent.trim()) ||
       this.cachedUserAgent ||
-      `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`;
+      `Mozilla/5.0 (${process.platform === 'linux' ? 'X11; Linux x86_64' : 'Windows NT 10.0; Win64; x64'}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browser.version()} Safari/537.36`;
+
+    if (process.platform === 'linux' && userAgent.includes('Windows NT')) {
+      userAgent = userAgent.replace(/Windows NT[^;)]+; Win64; x64|Windows NT[^;)]+/i, 'X11; Linux x86_64');
+    }
 
     const context = await browser.newContext({
       viewport,

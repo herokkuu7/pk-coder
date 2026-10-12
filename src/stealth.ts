@@ -11,12 +11,6 @@ export const STEALTH_CHROMIUM_ARGS: string[] = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage', // Critical in Docker/Render cgroups (uses /tmp instead of 64MB /dev/shm)
-  '--enable-webgl',
-  '--ignore-gpu-blocklist',
-  '--use-gl=angle',
-  '--use-angle=swiftshader',
-  '--enable-unsafe-swiftshader',
-  '--enable-unsafe-webgpu',
   '--no-first-run',
   '--no-default-browser-check',
   '--disable-breakpad',
@@ -44,96 +38,10 @@ export function getRandomDesktopViewport(): { width: number; height: number } {
  * Injects scripts before any page scripts execute to mask automation indicators
  * and present a standard desktop Chromium fingerprint.
  */
-export async function applyStealthScripts(context: BrowserContext): Promise<void> {
-  await context.addInitScript(() => {
-    // 1. Mock standard chrome runtime object
-    try {
-      const win = window as unknown as Record<string, unknown>;
-      if (!win.chrome) {
-        win.chrome = {
-          app: {
-            isInstalled: false,
-            InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
-            RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
-          },
-          runtime: {
-            OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
-            OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
-            PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
-            PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
-            PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
-            RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' },
-          },
-          loadTimes: () => {
-            const now = Date.now() / 1000;
-            return {
-              requestTime: now - 0.45,
-              startLoadTime: now - 0.4,
-              commitLoadTime: now - 0.25,
-              finishDocumentLoadTime: now - 0.1,
-              firstPaintTime: now - 0.15,
-              finishLoadTime: now - 0.05,
-              wasFetchedViaSpdy: true,
-              wasNpnNegotiated: true,
-              npnNegotiatedProtocol: 'h2',
-              connectionInfo: 'h2',
-            };
-          },
-          csi: () => ({
-            startE: Date.now() - 500,
-            onloadT: Date.now(),
-            pageT: 500,
-            tran: 15,
-          }),
-        };
-      }
-    } catch {}
-
-    // 2. Ensure navigator.languages is defined
-    try {
-      if (!navigator.languages || navigator.languages.length === 0) {
-        Object.defineProperty(navigator, 'languages', {
-          get: () => ['en-US', 'en'],
-          configurable: true,
-        });
-      }
-    } catch {}
-
-    // 2b. Align navigator.platform and userAgentData with User-Agent (crucial on Linux Docker)
-    try {
-      const isWin = navigator.userAgent.includes('Windows');
-      const isMac = navigator.userAgent.includes('Macintosh');
-      const targetPlatform = isWin ? 'Win32' : (isMac ? 'MacIntel' : 'Linux x86_64');
-      Object.defineProperty(navigator, 'platform', {
-        get: () => targetPlatform,
-        configurable: true,
-      });
-      const navAny = navigator as any;
-      if (navAny.userAgentData) {
-        Object.defineProperty(navAny.userAgentData, 'platform', {
-          get: () => (isWin ? 'Windows' : (isMac ? 'macOS' : 'Linux')),
-          configurable: true,
-        });
-      }
-    } catch {}
-
-    // 3. Strip automation artifacts & leakage flags
-    try {
-      const win = window as unknown as Record<string, unknown>;
-      [
-        'cdc_adoQpoasnfa76pfcZLmcfl_Array',
-        'cdc_adoQpoasnfa76pfcZLmcfl_Promise',
-        'cdc_adoQpoasnfa76pfcZLmcfl_Symbol',
-        '__nightmare',
-        'callPhantom',
-        '_phantom',
-      ].forEach((prop) => {
-        try {
-          delete win[prop];
-        } catch {}
-      });
-    } catch {}
-  }).catch(() => undefined);
+export async function applyStealthScripts(_context: BrowserContext): Promise<void> {
+  // Patchright natively patches automation indicators at the C++ engine level.
+  // We intentionally avoid injecting JavaScript prototype proxies or property getters,
+  // as Cloudflare Turnstile's integrity checker detects modified property descriptors.
 }
 
 /**
