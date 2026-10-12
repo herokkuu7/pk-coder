@@ -125,6 +125,18 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
         }
       } catch (e) {}
     });
+    function ensureTurnstileLoaded() {
+      if (!window.turnstile && !window.__turnstileToken) {
+        var existing = document.querySelector('script[src*="turnstile/v0/api.js"]');
+        if (existing) existing.remove();
+        var s = document.createElement('script');
+        s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+        s.async = true;
+        document.head.appendChild(s);
+      }
+    }
+    setTimeout(ensureTurnstileLoaded, 5000);
+    setTimeout(ensureTurnstileLoaded, 12000);
   </script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
