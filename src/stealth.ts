@@ -136,58 +136,36 @@ export async function simulateHumanClick(
  */
 export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean> {
   try {
-    // Strategy 1: Search page.frames() for Cloudflare Turnstile frames
-    // (Crucial: Cloudflare attaches the iframe inside a closed shadow root, so page.locator('iframe') misses it,
-    // but page.frames() tracks every frame in the browser process).
-    for (const f of page.frames()) {
-      const url = f.url().toLowerCase();
-      if (url.includes('challenge-platform') || url.includes('challenges.cloudflare.com')) {
-        logInfo('Detected Cloudflare challenge frame', { frameUrl: url.slice(0, 100) });
-        const elHandle = await f.frameElement().catch(() => null);
-        if (elHandle) {
-          const box = await elHandle.boundingBox().catch(() => null);
-          if (box && box.width > 0 && box.height > 0) {
-            // Checkbox target calculation: center of 300x65 widget checkbox is (box.x + 28, box.y + 32)
-            const targetX = Math.round(box.x + (box.width < 150 ? box.width / 2 : 28));
-            const targetY = Math.round(box.y + (box.height > 65 ? 32 : box.height / 2));
+    // 1. MUST wait until Cloudflare challenge execution frame has actually appeared!
+    const challengeFrame = page.frames().find((f) => {
+      const u = f.url().toLowerCase();
+      return u.includes('challenge-platform') || u.includes('challenges.cloudflare.com');
+    });
 
-            logInfo('Clicking Turnstile widget checkbox with human curve', { targetX, targetY, boxWidth: box.width, boxHeight: box.height });
-            await simulateHumanClick(page, targetX, targetY);
-            return true;
-          }
-        }
-
-        // Try direct click inside frame if elements are accessible
-        try {
-          const clickable = f.locator(
-            'input[type="checkbox"], .ctp-checkbox-container, .mark, #challenge-stage, #cf-stage, label, body'
-          ).first();
-          if ((await clickable.count().catch(() => 0)) > 0) {
-            const cbBox = await clickable.boundingBox().catch(() => null);
-            if (cbBox && cbBox.width > 0 && cbBox.height > 0) {
-              const targetX = Math.round(cbBox.x + cbBox.width / 2);
-              const targetY = Math.round(cbBox.y + cbBox.height / 2);
-              await simulateHumanClick(page, targetX, targetY);
-              return true;
-            }
-          }
-        } catch {}
-      }
+    if (!challengeFrame) {
+      // Challenge frame not attached yet — do not click early!
+      return false;
     }
 
-    // Strategy 2: Check for actual iframe inside Turnstile container
-    const containerIframe = page.locator(
-      '.cf-turnstile iframe, #cf-turnstile-wrapper iframe, [id^="cf-chl-widget"] iframe, iframe[src*="challenge"], iframe[src*="turnstile"], iframe[title*="Turnstile"], iframe[title*="Cloudflare"]'
-    ).first();
-    if ((await containerIframe.count().catch(() => 0)) > 0) {
-      const box = await containerIframe.boundingBox().catch(() => null);
-      if (box && box.width > 0 && box.height > 0) {
-        const targetX = Math.round(box.x + 28);
-        const targetY = Math.round(box.y + (box.height > 65 ? 32 : box.height / 2));
-        logInfo('Clicking container iframe checkbox', { targetX, targetY, boxWidth: box.width, boxHeight: box.height });
-        await simulateHumanClick(page, targetX, targetY);
-        return true;
-      }
+    // 2. Locate container or iframe bounding box
+    const container = page.locator('#cf-turnstile-wrapper, .cf-turnstile, [data-sitekey]').first();
+    const box = await Promise.race([
+      container.boundingBox(),
+      new Promise<null>((r) => setTimeout(() => r(null), 1000)),
+    ]).catch(() => null);
+
+    if (box && box.width > 0 && box.height > 0) {
+      const targetX = Math.round(box.x + 28);
+      const targetY = Math.round(box.y + 32);
+      logInfo('Clicking Turnstile widget checkbox with human curve', {
+        targetX,
+        targetY,
+        boxWidth: box.width,
+        boxHeight: box.height,
+        frameUrl: challengeFrame.url().slice(0, 100),
+      });
+      await simulateHumanClick(page, targetX, targetY);
+      return true;
     }
 
     return false;

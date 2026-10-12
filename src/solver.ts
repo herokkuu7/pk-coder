@@ -259,16 +259,25 @@ async function executeSingleSolveAttempt(
     if (req.cookies) {
       try {
         if (Array.isArray(req.cookies)) {
-          await context.addCookies(req.cookies);
+          const safeCookies = req.cookies.filter(
+            (c) => !c.name.toLowerCase().startsWith('cf_') && !c.name.toLowerCase().startsWith('__cf')
+          );
+          if (safeCookies.length > 0) {
+            await context.addCookies(safeCookies);
+          }
         } else if (typeof req.cookies === 'object') {
           const domain = new URL(req.siteurl).hostname;
-          const formatted = Object.entries(req.cookies).map(([name, value]) => ({
-            name,
-            value: String(value),
-            domain: domain.startsWith('.') ? domain : `.${domain}`,
-            path: '/',
-          }));
-          await context.addCookies(formatted);
+          const formatted = Object.entries(req.cookies)
+            .filter(([name]) => !name.toLowerCase().startsWith('cf_') && !name.toLowerCase().startsWith('__cf'))
+            .map(([name, value]) => ({
+              name,
+              value: String(value),
+              domain: domain.startsWith('.') ? domain : `.${domain}`,
+              path: '/',
+            }));
+          if (formatted.length > 0) {
+            await context.addCookies(formatted);
+          }
         }
       } catch (cookieErr) {
         logWarn('Failed to add client cookies to context', { err: String(cookieErr) });
@@ -530,12 +539,6 @@ async function solveWithHarness(
     const r = route.request();
     const url = r.url();
 
-    // Abort known IPv6-only PAT/telemetry canary that fails through residential IPv4 proxies
-    if (url.includes('brunhild.challenges.cloudflare.com')) {
-      await route.abort('blockedbyclient');
-      return;
-    }
-
     const isMainDoc = r.resourceType() === 'document' && r.frame() === page.mainFrame();
     const isCfPlatform = url.includes('challenge-platform') || url.includes('/cdn-cgi/');
 
@@ -624,12 +627,12 @@ async function solveWithHarness(
       return { error: `Cloudflare Turnstile error code: ${code}` };
     }
 
-    // 3. Try interactive checkbox click: click once after initial settle.
-    // Cloudflare Turnstile Proof-of-Work takes 8-25 seconds depending on hardware & proxy.
-    // NEVER re-click quickly (it resets the PoW computation and flags bot behavior).
-    // Only allow a second click if 25 seconds have passed without resolution.
+    // 3. Try interactive checkbox click: click once after initial settle (at least 2000ms).
+    // Cloudflare Turnstile Proof-of-Work takes 8-35 seconds depending on hardware & proxy.
+    // NEVER re-click while evaluation is in progress (it resets the PoW computation and flags bot behavior).
+    const elapsed = Date.now() - startTime;
     const timeSinceLastClick = Date.now() - lastClickTime;
-    if (!clickAttempted || timeSinceLastClick >= 25000) {
+    if ((!clickAttempted && elapsed >= 2000) || (clickAttempted && timeSinceLastClick >= 8000)) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         clickAttempted = true;
@@ -652,12 +655,9 @@ async function solveWithNavigation(
   timeoutMs: number,
   startTime: number,
 ): Promise<StepSolveResult> {
-  // Abort non-essential media assets & IPv6-only PAT canaries
+  // Abort non-essential media assets
   await page.route('**/*', (route) => {
     const url = route.request().url();
-    if (url.includes('brunhild.challenges.cloudflare.com')) {
-      return route.abort('blockedbyclient');
-    }
     if (/\.(png|jpg|jpeg|gif|webp|ico|svg|woff|woff2|ttf|mp4|webm|avi|mp3)(\?.*)?$/i.test(url)) {
       return route.abort();
     }
@@ -709,9 +709,8 @@ async function solveWithNavigation(
       return { cfClearance: 'cleared' };
     }
 
-    // 4. Intelligent pacing: wait at least 5s for challenge settling, and 25s between clicks
-    const timeSinceLastClick = Date.now() - lastClickTime;
-    if (elapsed >= 4000 && (!lastClickTime || timeSinceLastClick >= 25000)) {
+    // 4. Intelligent pacing: wait at least 4s for challenge settling, and click once
+    if (elapsed >= 4000 && !lastClickTime) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         lastClickTime = Date.now();
