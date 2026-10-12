@@ -528,8 +528,16 @@ async function solveWithHarness(
   // Never intercept iframe documents (Turnstile challenge widget runs inside an iframe).
   await page.route('**/*', async (route) => {
     const r = route.request();
+    const url = r.url();
+
+    // Abort known IPv6-only PAT/telemetry canary that fails through residential IPv4 proxies
+    if (url.includes('brunhild.challenges.cloudflare.com')) {
+      await route.abort('blockedbyclient');
+      return;
+    }
+
     const isMainDoc = r.resourceType() === 'document' && r.frame() === page.mainFrame();
-    const isCfPlatform = r.url().includes('challenge-platform') || r.url().includes('/cdn-cgi/');
+    const isCfPlatform = url.includes('challenge-platform') || url.includes('/cdn-cgi/');
 
     if (isMainDoc && !isCfPlatform) {
       await route.fulfill({
@@ -568,6 +576,7 @@ async function solveWithHarness(
   page.on('requestfailed', (r) => {
     const err = r.failure()?.errorText || '';
     const url = r.url();
+    if (url.includes('brunhild.challenges.cloudflare.com')) return;
     logWarn('Harness resource load failed', { url: url.slice(0, 120), error: err });
     if (url.includes('/turnstile/f/av0/rch/') && (err.includes('TIMED_OUT') || err.includes('TUNNEL') || err.includes('ABORTED'))) {
       fatalProxyError = `Challenge iframe network failure (${err})`;
@@ -615,10 +624,12 @@ async function solveWithHarness(
       return { error: `Cloudflare Turnstile error code: ${code}` };
     }
 
-    // 3. Try interactive checkbox click: click once after initial settle,
-    // and wait at least 8 seconds before any retry so Cloudflare proof-of-work is not interrupted.
+    // 3. Try interactive checkbox click: click once after initial settle.
+    // Cloudflare Turnstile Proof-of-Work takes 8-25 seconds depending on hardware & proxy.
+    // NEVER re-click quickly (it resets the PoW computation and flags bot behavior).
+    // Only allow a second click if 25 seconds have passed without resolution.
     const timeSinceLastClick = Date.now() - lastClickTime;
-    if (!clickAttempted || timeSinceLastClick >= 8000) {
+    if (!clickAttempted || timeSinceLastClick >= 25000) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         clickAttempted = true;
@@ -641,9 +652,16 @@ async function solveWithNavigation(
   timeoutMs: number,
   startTime: number,
 ): Promise<StepSolveResult> {
-  // Abort non-essential media assets to prevent slow residential proxies from timing out on page.goto
-  await page.route('**/*.{png,jpg,jpeg,gif,webp,ico,svg,woff,woff2,ttf,mp4,webm,avi,mp3}', (route) => {
-    route.abort().catch(() => {});
+  // Abort non-essential media assets & IPv6-only PAT canaries
+  await page.route('**/*', (route) => {
+    const url = route.request().url();
+    if (url.includes('brunhild.challenges.cloudflare.com')) {
+      return route.abort('blockedbyclient');
+    }
+    if (/\.(png|jpg|jpeg|gif|webp|ico|svg|woff|woff2|ttf|mp4|webm|avi|mp3)(\?.*)?$/i.test(url)) {
+      return route.abort();
+    }
+    return route.fallback();
   }).catch(() => {});
 
   await page.goto(req.siteurl, {
@@ -691,9 +709,9 @@ async function solveWithNavigation(
       return { cfClearance: 'cleared' };
     }
 
-    // 4. Intelligent pacing: wait at least 5s for challenge settling, and 4.5s between clicks
+    // 4. Intelligent pacing: wait at least 5s for challenge settling, and 25s between clicks
     const timeSinceLastClick = Date.now() - lastClickTime;
-    if (elapsed >= 4000 && timeSinceLastClick >= 4000) {
+    if (elapsed >= 4000 && (!lastClickTime || timeSinceLastClick >= 25000)) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         lastClickTime = Date.now();
