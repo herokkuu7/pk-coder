@@ -89,22 +89,12 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
       margin: 10px 0;
     }
   </style>
-</head>
-<body>
-  <div id="cf-turnstile-wrapper"
-       class="cf-turnstile"
-       data-sitekey="${escapeHtml(sitekey)}"${actionAttr}${cdataAttr}
-       data-callback="onTurnstileSuccess"
-       data-error-callback="onTurnstileError"
-       data-expired-callback="onTurnstileExpired">
-  </div>
-  <input type="hidden" name="cf-turnstile-response" id="cf-turnstile-response" value="" />
-  <input type="hidden" name="turnstileToken" id="turnstileToken" value="" />
   <script>
     window.__turnstileToken = null;
     window.__turnstileError = null;
     window.onTurnstileSuccess = function(token) {
       window.__turnstileToken = token;
+      try { document.title = 'TURNSTILE_TOKEN:' + token; } catch(e) {}
       var el1 = document.getElementById('cf-turnstile-response');
       if (el1) el1.value = token;
       var el2 = document.getElementById('turnstileToken');
@@ -126,6 +116,7 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
           var tok = data.token || data.turnstileToken || data.response || (data.data && (data.data.token || data.data.response));
           if (typeof tok === 'string' && tok.length > 20) {
             window.__turnstileToken = tok;
+            try { document.title = 'TURNSTILE_TOKEN:' + tok; } catch(e) {}
             var el1 = document.getElementById('cf-turnstile-response');
             if (el1) el1.value = tok;
             var el2 = document.getElementById('turnstileToken');
@@ -136,6 +127,18 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
     });
   </script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</head>
+<body>
+  <div id="cf-turnstile-wrapper"
+       class="cf-turnstile"
+       data-sitekey="${escapeHtml(sitekey)}"${actionAttr}${cdataAttr}
+       data-response-field-name="turnstileToken"
+       data-callback="onTurnstileSuccess"
+       data-error-callback="onTurnstileError"
+       data-expired-callback="onTurnstileExpired">
+  </div>
+  <input type="hidden" name="cf-turnstile-response" id="cf-turnstile-response" value="" />
+  <input type="hidden" name="turnstileToken" id="turnstileToken" value="" />
 </body>
 </html>`;
 }
@@ -144,6 +147,11 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
  * Evaluates the page and all known inputs/frames to retrieve any populated Turnstile token.
  */
 async function extractTokenFromPage(page: Page): Promise<string | null> {
+  const title = await page.title().catch(() => '');
+  if (typeof title === 'string' && title.startsWith('TURNSTILE_TOKEN:')) {
+    const tok = title.slice('TURNSTILE_TOKEN:'.length);
+    if (tok.length > 5) return tok;
+  }
   const fromEval = await page.evaluate(() => {
     const win = window as unknown as {
       __turnstileToken?: string | null;
