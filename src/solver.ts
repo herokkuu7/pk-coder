@@ -240,12 +240,16 @@ async function executeSingleSolveAttempt(
   timeoutMs: number,
   mode: SolverMode,
   attemptStartTime: number,
+  signal: AbortSignal,
 ): Promise<SolveResult> {
   const browserManager = BrowserManager.getInstance();
   let context: BrowserContext | null = null;
   let page: Page | null = null;
+  const onAbort = () => { void context?.close().catch(() => {}); };
+  signal.addEventListener('abort', onAbort, { once: true });
 
   try {
+    signal.throwIfAborted();
     logInfo('Starting Turnstile solve attempt', {
       siteurl: req.siteurl,
       sitekey: req.sitekey,
@@ -255,6 +259,7 @@ async function executeSingleSolveAttempt(
     });
 
     context = await browserManager.createContext(proxyConfig, req.userAgent);
+    signal.throwIfAborted();
 
     if (req.cookies) {
       try {
@@ -291,14 +296,15 @@ async function executeSingleSolveAttempt(
     let stepResult: StepSolveResult;
 
     if (mode === 'harness' && req.sitekey) {
-      stepResult = await solveWithHarness(page, req, timeoutMs, attemptStartTime);
+      stepResult = await solveWithHarness(page, req, timeoutMs, attemptStartTime, signal);
       if (stepResult.error?.includes('600010')) {
         logInfo('Harness mode encountered 600010 (interstitial key), falling back to navigation mode', { siteurl: req.siteurl });
-        stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime);
+        stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal);
       }
     } else {
-      stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime);
+      stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal);
     }
+    signal.throwIfAborted();
 
     // Extract all cookies from context
     let cookiesRecord: Record<string, string> | undefined;
@@ -372,14 +378,15 @@ async function executeSingleSolveAttempt(
   } finally {
     if (page) {
       try {
-        lastDebugScreenshot = await page.screenshot().catch(() => null);
+        if (!signal.aborted) lastDebugScreenshot = await page.screenshot({ timeout: 2000 }).catch(() => null);
       } catch {}
       await Promise.race([page.close(), new Promise((r) => setTimeout(r, 2000))]).catch(() => {});
     }
     if (context) {
       await Promise.race([context.close(), new Promise((r) => setTimeout(r, 2000))]).catch(() => {});
     }
-    await browserManager.notifySolveCompleted(solverQueue.active);
+    try { await browserManager.notifySolveCompleted(solverQueue.active); }
+    finally { signal.removeEventListener('abort', onAbort); }
   }
 }
 
@@ -393,11 +400,12 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
   const totalTimeoutMs = req.timeout ?? config.defaultTimeoutMs;
   const mode: SolverMode = req.mode ?? 'harness';
 
-  return solverQueue.run(async () => {
+  return solverQueue.run(async (workSignal) => {
+    workSignal.throwIfAborted();
     // 1. Explicit per-request proxy override (or explicit 'direct')
     if (req.proxy && typeof req.proxy === 'string' && req.proxy !== 'auto') {
       const explicitProxy = parseProxy(req.proxy);
-      const res = await executeSingleSolveAttempt(req, explicitProxy, totalTimeoutMs, mode, overallStartTime);
+      const res = await executeSingleSolveAttempt(req, explicitProxy, totalTimeoutMs, mode, overallStartTime, workSignal);
       res.durationMs = Date.now() - overallStartTime;
       if (res.ok) {
         solverStats.recordSuccess(res.durationMs);
@@ -409,7 +417,7 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
 
     if (req.proxy && typeof req.proxy === 'object') {
       const explicitProxy = parseProxy(req.proxy);
-      const res = await executeSingleSolveAttempt(req, explicitProxy, totalTimeoutMs, mode, overallStartTime);
+      const res = await executeSingleSolveAttempt(req, explicitProxy, totalTimeoutMs, mode, overallStartTime, workSignal);
       res.durationMs = Date.now() - overallStartTime;
       if (res.ok) {
         solverStats.recordSuccess(res.durationMs);
@@ -422,7 +430,7 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
     // 2. If no proxies in pool, run with default proxy config or direct
     if (proxyPool.size === 0) {
       const defaultProxy = parseProxy();
-      const res = await executeSingleSolveAttempt(req, defaultProxy, totalTimeoutMs, mode, overallStartTime);
+      const res = await executeSingleSolveAttempt(req, defaultProxy, totalTimeoutMs, mode, overallStartTime, workSignal);
       res.durationMs = Date.now() - overallStartTime;
       if (res.ok) {
         solverStats.recordSuccess(res.durationMs);
@@ -437,6 +445,7 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
     let lastResult: SolveResult | null = null;
 
     for (let attempt = 0; attempt < proxyPool.size; attempt++) {
+      workSignal.throwIfAborted();
       const candidateIndex = (startIndex + attempt) % proxyPool.size;
       const candidateConfig = proxyPool.getProxyAt(candidateIndex);
       const candidateRaw = proxyPool.getRawAt(candidateIndex) || '';
@@ -479,6 +488,7 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
         candidateBudget,
         mode,
         attemptStartTime,
+        workSignal,
       );
 
       result.proxyUsed = masked;
@@ -525,6 +535,7 @@ async function solveWithHarness(
   req: SolveRequest,
   timeoutMs: number,
   startTime: number,
+  signal: AbortSignal,
 ): Promise<StepSolveResult> {
   if (!req.sitekey) {
     return { error: 'Sitekey is required for harness mode' };
@@ -604,6 +615,7 @@ async function solveWithHarness(
   await page.waitForTimeout(2000).catch(() => {});
 
   while (Date.now() < deadline) {
+    signal.throwIfAborted();
     // 0. Check network intercepted token first
     if (networkCapturedToken) return { token: networkCapturedToken };
 
@@ -654,6 +666,7 @@ async function solveWithNavigation(
   req: SolveRequest,
   timeoutMs: number,
   startTime: number,
+  signal: AbortSignal,
 ): Promise<StepSolveResult> {
   // Abort non-essential media assets
   await page.route('**/*', (route) => {
@@ -673,6 +686,7 @@ async function solveWithNavigation(
   let lastClickTime = 0;
 
   while (Date.now() < deadline) {
+    signal.throwIfAborted();
     // 1. Check for a real Turnstile token on the page
     const token = await extractTokenFromPage(page);
     if (token) return { token };

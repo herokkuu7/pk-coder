@@ -1,3 +1,5 @@
+import { AsyncResource } from 'node:async_hooks';
+
 export class QueueFullError extends Error {
   constructor(message = 'Solver concurrency queue is full. Try again shortly.') {
     super(message);
@@ -6,9 +8,11 @@ export class QueueFullError extends Error {
 }
 
 interface QueuedItem<T> {
-  task: () => Promise<T>;
+  task: (signal: AbortSignal) => Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
+  controller: AbortController;
+  detachAbort: () => void;
 }
 
 export class ConcurrencyQueue {
@@ -45,12 +49,12 @@ export class ConcurrencyQueue {
     };
   }
 
-  public async run<T>(task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  public async run<T>(task: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (signal?.aborted) {
       throw new Error('Task was aborted before entering queue');
     }
 
-    if (this.queue.length >= this.maxQueueSize) {
+    if (this.activeCount >= this.maxConcurrent && this.queue.length >= this.maxQueueSize) {
       this.totalRejected++;
       throw new QueueFullError(
         `Solver queue full (active=${this.activeCount}/${this.maxConcurrent}, waiting=${this.queue.length}/${this.maxQueueSize})`
@@ -58,7 +62,8 @@ export class ConcurrencyQueue {
     }
 
     return new Promise<T>((resolve, reject) => {
-      const item: QueuedItem<T> = { task, resolve, reject };
+      const controller = new AbortController();
+      const item: QueuedItem<T> = { task: AsyncResource.bind(task), resolve, reject, controller, detachAbort: () => {} };
 
       if (signal) {
         const onAbort = () => {
@@ -66,9 +71,15 @@ export class ConcurrencyQueue {
           if (idx !== -1) {
             this.queue.splice(idx, 1);
             reject(new Error('Task aborted while waiting in concurrency queue'));
+            item.detachAbort();
+          } else {
+            const error = new Error('Task aborted during execution');
+            controller.abort(error);
+            reject(error);
           }
         };
         signal.addEventListener('abort', onAbort, { once: true });
+        item.detachAbort = () => signal.removeEventListener('abort', onAbort);
       }
 
       this.queue.push(item);
@@ -89,18 +100,20 @@ export class ConcurrencyQueue {
     (async () => {
       let timeoutTimer: NodeJS.Timeout | null = null;
       try {
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timeoutTimer = setTimeout(() => {
-            reject(new Error('Task execution timed out after 120s in concurrency queue'));
-          }, 120_000);
-        });
-
-        const result = await Promise.race([item.task(), timeoutPromise]);
+        timeoutTimer = setTimeout(() => {
+          const error = new Error('Task execution timed out after 120s in concurrency queue');
+          item.controller.abort(error);
+          item.reject(error);
+        }, 120_000);
+        // Reject the caller on cancellation, but hold capacity until work has
+        // stopped and completed its cleanup. A Promise.race freed the slot early.
+        const result = await item.task(item.controller.signal);
         item.resolve(result);
       } catch (err) {
         item.reject(err);
       } finally {
         if (timeoutTimer) clearTimeout(timeoutTimer);
+        item.detachAbort();
         this.activeCount = Math.max(0, this.activeCount - 1);
         this.totalProcessed++;
         this.dequeue();

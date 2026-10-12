@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from 'express';
+import { randomUUID } from 'node:crypto';
 import cors from 'cors';
-import { config, logInfo, logWarn, logError, getLogs } from './config';
+import { config, logInfo, logWarn, logError, getLogs, requestLogContext } from './config';
 import { solveTurnstile, solverQueue, solverStats, lastDebugScreenshot } from './solver';
 import { proxyPool } from './proxyPool';
 import { BrowserManager } from './browser';
@@ -11,6 +12,22 @@ export const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+app.use('/solve', (req, res, next) => {
+  const supplied = req.header('x-request-id');
+  const requestId = supplied && /^[a-zA-Z0-9_-]{1,128}$/.test(supplied) ? supplied : randomUUID();
+  const startedAt = Date.now();
+  res.setHeader('x-request-id', requestId);
+  res.on('finish', () => logInfo('Solve HTTP response completed', {
+    requestId, status: res.statusCode, durationMs: Date.now() - startedAt,
+  }));
+  res.on('close', () => {
+    if (!res.writableEnded) logWarn('Solve client disconnected', { requestId, durationMs: Date.now() - startedAt });
+  });
+  requestLogContext.run({ requestId }, () => {
+    logInfo('Solve HTTP request received', { mode: req.body?.mode, requiresToken: !!req.body?.sitekey });
+    next();
+  });
+});
 
 /**
  * Public IP check endpoint.
@@ -69,7 +86,7 @@ app.get(['/health', '/'], (_req: Request, res: Response) => {
     },
   };
 
-  res.status(200).json(health);
+  res.status(200).json({ ...health, revision: process.env.RENDER_GIT_COMMIT ?? null });
 });
 
 /**
@@ -200,6 +217,8 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     };
 
     const result = await solveTurnstile(solveReq, abortController.signal);
+    logInfo('Solve operation finished', { ok: result.ok, mode: result.modeUsed, durationMs: result.durationMs });
+    if (res.destroyed) return;
 
     const hasToken = typeof result.token === 'string' && result.token.trim().length > 10;
     const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 0;
@@ -237,6 +256,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
       proxyUsed: result.proxyUsed,
     });
   } catch (err) {
+    if (res.destroyed) return;
     if (err instanceof QueueFullError) {
       res.status(429).json({
         ok: false,
