@@ -287,12 +287,8 @@ export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean
             const targetX = Math.round(box.x + (box.width < 150 ? box.width / 2 : 28));
             const targetY = Math.round(box.y + (box.height > 65 ? 32 : box.height / 2));
 
-            logInfo('Clicking Turnstile widget checkbox', { targetX, targetY, boxWidth: box.width, boxHeight: box.height });
-            await page.mouse.move(targetX, targetY).catch(() => {});
-            await page.waitForTimeout(100).catch(() => {});
-            await page.mouse.down().catch(() => {});
-            await page.waitForTimeout(80).catch(() => {});
-            await page.mouse.up().catch(() => {});
+            logInfo('Clicking Turnstile widget checkbox with human curve', { targetX, targetY, boxWidth: box.width, boxHeight: box.height });
+            await simulateHumanClick(page, targetX, targetY);
             return true;
           }
         }
