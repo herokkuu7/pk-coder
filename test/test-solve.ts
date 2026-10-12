@@ -5,16 +5,19 @@ async function main() {
   const args = process.argv.slice(2);
   const targetSitekey = args[0] || '3x00000000000000000000FF'; // default to interactive test
   const targetUrl = args[1] || 'https://example.com';
+  const targetProxy = args[2] || undefined;
 
   console.log(`Testing Turnstile solver against:`);
   console.log(`  Site URL: ${targetUrl}`);
   console.log(`  Sitekey:  ${targetSitekey}`);
+  if (targetProxy) console.log(`  Proxy:    ${targetProxy}`);
 
   try {
     const res = await solveTurnstile({
       siteurl: targetUrl,
       sitekey: targetSitekey,
-      timeout: 30000,
+      proxy: targetProxy,
+      timeout: 35000,
     });
 
     console.log('Result:', res);

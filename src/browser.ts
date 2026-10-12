@@ -120,7 +120,7 @@ export class BrowserManager {
       deviceScaleFactor: 1,
       hasTouch: false,
       isMobile: false,
-      ...(overrideUserAgent ? { userAgent: overrideUserAgent } : {}),
+      userAgent,
     });
 
     // 1. Inject anti-fingerprinting & stealth masks

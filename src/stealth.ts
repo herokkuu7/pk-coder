@@ -1,4 +1,5 @@
 import type { BrowserContext, Page } from 'patchright';
+import { logInfo } from './config';
 
 /**
  * Ultra-low-memory and stealth flags for Chromium on Render (512MB RAM).
@@ -89,6 +90,24 @@ export async function applyStealthScripts(context: BrowserContext): Promise<void
       if (!navigator.languages || navigator.languages.length === 0) {
         Object.defineProperty(navigator, 'languages', {
           get: () => ['en-US', 'en'],
+          configurable: true,
+        });
+      }
+    } catch {}
+
+    // 2b. Align navigator.platform and userAgentData with User-Agent (crucial on Linux Docker)
+    try {
+      const isWin = navigator.userAgent.includes('Windows');
+      const isMac = navigator.userAgent.includes('Macintosh');
+      const targetPlatform = isWin ? 'Win32' : (isMac ? 'MacIntel' : 'Linux x86_64');
+      Object.defineProperty(navigator, 'platform', {
+        get: () => targetPlatform,
+        configurable: true,
+      });
+      const navAny = navigator as any;
+      if (navAny.userAgentData) {
+        Object.defineProperty(navAny.userAgentData, 'platform', {
+          get: () => (isWin ? 'Windows' : (isMac ? 'macOS' : 'Linux')),
           configurable: true,
         });
       }
@@ -252,6 +271,7 @@ export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean
     for (const f of page.frames()) {
       const url = f.url().toLowerCase();
       if (url.includes('challenge-platform') || url.includes('challenges.cloudflare.com')) {
+        logInfo('Detected Cloudflare challenge frame', { frameUrl: url.slice(0, 100) });
         const elHandle = await f.frameElement().catch(() => null);
         if (elHandle) {
           const box = await elHandle.boundingBox().catch(() => null);
@@ -260,6 +280,7 @@ export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean
             const targetX = Math.round(box.x + (box.width < 150 ? box.width / 2 : 28));
             const targetY = Math.round(box.y + (box.height > 65 ? 32 : box.height / 2));
 
+            logInfo('Clicking Turnstile widget checkbox', { targetX, targetY, boxWidth: box.width, boxHeight: box.height });
             await page.mouse.move(targetX, targetY).catch(() => {});
             await page.waitForTimeout(100).catch(() => {});
             await page.mouse.down().catch(() => {});
