@@ -72,9 +72,9 @@ export class BrowserManager {
         this.solvesCount = 0;
         this.browserRestarts++;
 
-        // Cache a realistic User-Agent based on the actual Chromium version
         const version = instance.version();
-        this.cachedUserAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
+        const os = process.platform === 'linux' ? 'X11; Linux x86_64' : 'Windows NT 10.0; Win64; x64';
+        this.cachedUserAgent = `Mozilla/5.0 (${os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version} Safari/537.36`;
 
         return instance;
       } catch (err) {

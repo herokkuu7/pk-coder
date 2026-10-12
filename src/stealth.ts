@@ -13,6 +13,10 @@ export const STEALTH_CHROMIUM_ARGS: string[] = [
   '--disable-dev-shm-usage', // Critical in Docker/Render cgroups (uses /tmp instead of 64MB /dev/shm)
   '--enable-webgl',
   '--ignore-gpu-blocklist',
+  '--use-gl=angle',
+  '--use-angle=swiftshader',
+  '--enable-unsafe-swiftshader',
+  '--enable-unsafe-webgpu',
   '--no-first-run',
   '--no-default-browser-check',
   '--disable-breakpad',
@@ -130,10 +134,13 @@ export async function applyStealthScripts(context: BrowserContext): Promise<void
       });
     } catch {}
 
-    // 4. Mock WebGL vendor & renderer to hide SwiftShader/software rasterizer flags
+    // 4. Mock WebGL vendor & renderer to match host OS cleanly
     try {
-      const spoofVendor = 'Google Inc. (NVIDIA)';
-      const spoofRenderer = 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
+      const isLinux = navigator.userAgent.includes('Linux') || navigator.platform.includes('Linux');
+      const spoofVendor = isLinux ? 'Google Inc. (Intel)' : 'Google Inc. (NVIDIA)';
+      const spoofRenderer = isLinux
+        ? 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'
+        : 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
       if (typeof WebGLRenderingContext !== 'undefined') {
         const origGetParam = WebGLRenderingContext.prototype.getParameter;
         WebGLRenderingContext.prototype.getParameter = function(param: number) {
