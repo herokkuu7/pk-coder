@@ -254,27 +254,41 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
 
 // Start listening if executed directly
 if (require.main === module) {
-  const server = app.listen(config.port, config.host, () => {
-    logInfo(`CPSolver microservice listening on http://${config.host}:${config.port}`, {
-      port: config.port,
-      maxConcurrent: config.maxConcurrentSolves,
-      maxQueue: config.maxQueueSize,
-      headless: config.headless,
-    });
-  });
+  const portsToListen = new Set<number>([config.port, 10000, 3000]);
+  const servers: import('http').Server[] = [];
+
+  for (const p of portsToListen) {
+    try {
+      const s = app.listen(p, config.host, () => {
+        logInfo(`CPSolver microservice listening on http://${config.host}:${p}`, {
+          port: p,
+          maxConcurrent: config.maxConcurrentSolves,
+          maxQueue: config.maxQueueSize,
+          headless: config.headless,
+        });
+      });
+      s.on('error', (err: any) => {
+        if (err.code !== 'EADDRINUSE') {
+          logError(`Error on port ${p}`, { error: String(err) });
+        }
+      });
+      servers.push(s);
+    } catch {}
+  }
 
   const shutdown = async (signal: string) => {
     logInfo(`Received ${signal}. Shutting down gracefully...`);
-    server.close(async () => {
-      try {
-        await BrowserManager.getInstance().close();
-        logInfo('CPSolver shutdown complete.');
-        process.exit(0);
-      } catch (err) {
-        logError('Error closing browser on shutdown', { error: String(err) });
-        process.exit(1);
-      }
-    });
+    for (const s of servers) {
+      s.close();
+    }
+    try {
+      await BrowserManager.getInstance().close();
+      logInfo('CPSolver shutdown complete.');
+      process.exit(0);
+    } catch (err) {
+      logError('Error closing browser on shutdown', { error: String(err) });
+      process.exit(1);
+    }
   };
 
   process.on('SIGINT', () => void shutdown('SIGINT'));

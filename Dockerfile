@@ -43,8 +43,8 @@ COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 
-# Port exposure
-EXPOSE 10000
+# Port exposure (support both Render default 10000 and custom PORT=3000)
+EXPOSE 10000 3000
 
 # Start Xvfb virtual display in background, then launch solver microservice
 CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x800x24 -ac & node dist/src/index.js"]
