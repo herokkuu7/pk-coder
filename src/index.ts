@@ -179,7 +179,8 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     mode ? mode : (isInterstitialKey ? 'navigate' : (sitekey ? 'harness' : 'navigate'));
 
   const abortController = new AbortController();
-  req.on('close', () => {
+  // Request-body completion is not a client disconnect. Observe the response.
+  res.on('close', () => {
     if (!res.writableEnded) {
       abortController.abort();
     }

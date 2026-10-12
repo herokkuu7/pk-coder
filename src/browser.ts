@@ -42,6 +42,12 @@ export class BrowserManager {
       await this.recyclingPromise;
     }
 
+    return this.getOrLaunchBrowser();
+  }
+
+  // Recycling owns the lifecycle gate and must not wait on itself.
+  private async getOrLaunchBrowser(): Promise<Browser> {
+
     if (this.browser && this.browser.isConnected()) {
       return this.browser;
     }
@@ -178,7 +184,7 @@ export class BrowserManager {
           } catch {}
         }
 
-        await this.ensureBrowser();
+        await this.getOrLaunchBrowser();
       } catch (err) {
         logError('Error recycling browser instance', { error: String(err) });
       } finally {
