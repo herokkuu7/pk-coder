@@ -158,6 +158,21 @@ export async function applyStealthScripts(context: BrowserContext): Promise<void
         };
       }
     } catch {}
+
+    // 5. Intercept postMessage to avoid cross-origin target origin mismatch errors
+    try {
+      const origPostMessage = Window.prototype.postMessage;
+      (Window.prototype as any).postMessage = function(msg: any, targetOrigin: any, transfer?: any) {
+        const safeOrigin =
+          typeof targetOrigin === 'string' && (targetOrigin.startsWith('http') || targetOrigin.includes('cloudflare'))
+            ? '*'
+            : targetOrigin;
+        if (transfer !== undefined) {
+          return (origPostMessage as any).call(this, msg, safeOrigin, transfer);
+        }
+        return (origPostMessage as any).call(this, msg, safeOrigin);
+      };
+    } catch {}
   }).catch(() => undefined);
 }
 

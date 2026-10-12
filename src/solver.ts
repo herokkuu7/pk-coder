@@ -115,6 +115,24 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
     window.onTurnstileExpired = function() {
       window.__turnstileToken = null;
     };
+    window.addEventListener('message', function(event) {
+      try {
+        var data = event.data;
+        if (typeof data === 'string' && data.indexOf('{') >= 0) {
+          data = JSON.parse(data);
+        }
+        if (data && typeof data === 'object') {
+          var tok = data.token || data.turnstileToken || data.response || (data.data && data.data.token);
+          if (typeof tok === 'string' && tok.length > 20) {
+            window.__turnstileToken = tok;
+            var el1 = document.getElementById('cf-turnstile-response');
+            if (el1) el1.value = tok;
+            var el2 = document.getElementById('turnstileToken');
+            if (el2) el2.value = tok;
+          }
+        }
+      } catch (e) {}
+    });
   </script>
 </body>
 </html>`;
@@ -156,6 +174,29 @@ async function extractTokenFromPage(page: Page): Promise<string | null> {
   }).catch(() => null);
 
   if (fromEval) return fromEval;
+
+  // Search all child frames for token in inputs or window properties
+  for (const f of page.frames()) {
+    try {
+      const frameVal = await f.evaluate(() => {
+        const win = window as any;
+        if (typeof win.__turnstileToken === 'string' && win.__turnstileToken.length > 5) {
+          return win.__turnstileToken;
+        }
+        const inputs = document.querySelectorAll(
+          'input[name*="turnstile"], input[id*="turnstile"], input[id*="cf-chl-widget"], input[name="cf-turnstile-response"]'
+        );
+        for (const inp of Array.from(inputs)) {
+          const val = (inp as HTMLInputElement).value;
+          if (typeof val === 'string' && val.length > 5) {
+            return val;
+          }
+        }
+        return null;
+      }).catch(() => null);
+      if (frameVal) return frameVal;
+    } catch {}
+  }
 
   try {
     const val = await page.locator('input[name="cf-turnstile-response"]').inputValue({ timeout: 150 });
@@ -491,9 +532,9 @@ async function solveWithHarness(
     if (url.includes('challenge-platform') || url.includes('challenges.cloudflare.com')) {
       try {
         const text = await res.text().catch(() => '');
-        if (text && (text.includes('"token"') || text.includes('"turnstileToken"'))) {
-          const match = text.match(/"(?:turnstile)?Token"\s*:\s*"([^"]+)"/);
-          if (match && match[1] && match[1].length > 20) {
+        if (text && (text.includes('"token"') || text.includes('"turnstileToken"') || text.includes('"value"'))) {
+          const match = text.match(/"(?:turnstileToken|token|value|response)"\s*:\s*"([^"]{20,})"/);
+          if (match && match[1] && (match[1].startsWith('0.') || match[1].length > 40)) {
             logInfo('Turnstile token intercepted directly from challenge network response!', {
               tokenLength: match[1].length,
               url: url.slice(0, 100),
@@ -515,7 +556,7 @@ async function solveWithHarness(
   });
 
   await page.goto(targetUrl, {
-    waitUntil: 'domcontentloaded',
+    waitUntil: 'commit',
     timeout: Math.min(timeoutMs, 25000),
   });
 
