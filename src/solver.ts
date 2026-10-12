@@ -75,11 +75,10 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Verification</title>
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onloadTurnstileCallback" async defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <style>
     body {
-      margin: 0;
-      padding: 30px;
+      margin: 20px;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       background: #ffffff;
     }
@@ -115,24 +114,6 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
     };
     window.onTurnstileExpired = function() {
       window.__turnstileToken = null;
-    };
-    window.onloadTurnstileCallback = function() {
-      // Fallback explicit render if DOM scanning did not populate the wrapper
-      setTimeout(function() {
-        var wrapper = document.getElementById('cf-turnstile-wrapper');
-        if (window.turnstile && wrapper && wrapper.children.length === 0 && !window.__turnstileToken) {
-          try {
-            window.turnstile.render(wrapper, {
-              sitekey: ${JSON.stringify(sitekey)},
-              callback: window.onTurnstileSuccess,
-              'error-callback': window.onTurnstileError,
-              'expired-callback': window.onTurnstileExpired,
-              action: ${JSON.stringify(action || undefined)},
-              cdata: ${JSON.stringify(cdata || undefined)},
-            });
-          } catch (e) {}
-        }
-      }, 500);
     };
   </script>
 </body>
@@ -276,12 +257,10 @@ async function executeSingleSolveAttempt(
     const hasClearance = !!(stepResult.cfClearance || cfClearance);
     const hasCookies = !!(cookiesRecord && Object.keys(cookiesRecord).some((k) => k.toLowerCase().startsWith('cf_')));
 
-    // Codeforces uses managed interstitial Turnstile; clearance cookies bypass the challenge.
-    const isCodeforces = req.siteurl.includes('codeforces.com');
-
-    // When sitekey is requested for generic sites, token is strictly required.
-    // For Codeforces, clearance cookies or token both succeed.
-    const isSuccessful = (req.sitekey && !isCodeforces)
+    // Interstitial challenge key (0x4AAAAAAADnPIDROrmt1Wwj) only needs clearance cookies.
+    // Interactive form widget keys (e.g. 0x4AAAAAACDz1ltMYNJCAQZS) strictly require a token.
+    const isInterstitialKey = req.sitekey === '0x4AAAAAAADnPIDROrmt1Wwj';
+    const isSuccessful = (req.sitekey && !isInterstitialKey)
       ? hasValidToken
       : (hasValidToken || hasClearance || hasCookies);
 
@@ -509,7 +488,11 @@ async function solveWithHarness(
   });
 
   const deadline = startTime + timeoutMs;
-  let hasAttemptedClick = false;
+  let clickAttempted = false;
+  let lastClickTime = 0;
+
+  // Allow Turnstile API script and container iframe to mount and stabilize
+  await page.waitForTimeout(2000).catch(() => {});
 
   while (Date.now() < deadline) {
     // 1. Check for resolved token
@@ -527,15 +510,18 @@ async function solveWithHarness(
       return { error: `Cloudflare Turnstile error code: ${code}` };
     }
 
-    // 3. Try interactive checkbox click if present
-    if (!hasAttemptedClick || Math.random() < 0.4) {
+    // 3. Try interactive checkbox click: click once after initial settle,
+    // and debounce re-clicks by at least 8 seconds if no token has arrived yet.
+    const timeSinceLastClick = Date.now() - lastClickTime;
+    if (!clickAttempted || timeSinceLastClick >= 8000) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
-        hasAttemptedClick = true;
+        clickAttempted = true;
+        lastClickTime = Date.now();
       }
     }
 
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 400));
   }
 
   return { error: `Turnstile challenge timed out after ${timeoutMs}ms without token` };

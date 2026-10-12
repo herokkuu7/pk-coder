@@ -11,7 +11,7 @@ export const config = {
   maxQueueSize: Math.max(1, parseInt(process.env.MAX_QUEUE_SIZE || '10', 10)),
   maxSolvesBeforeRecycle: Math.max(5, parseInt(process.env.MAX_SOLVES_BEFORE_RECYCLE || '50', 10)),
   maxRssMb: parseInt(process.env.MAX_RSS_MB || '380', 10),
-  headless: process.env.HEADLESS !== 'false',
+  headless: process.env.HEADLESS === 'true',
   defaultProxyUrl: process.env.PROXY_URL?.trim(),
   defaultProxyServer: process.env.PROXY_SERVER?.trim(),
   defaultProxyUsername: process.env.PROXY_USERNAME?.trim(),

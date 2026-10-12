@@ -11,25 +11,15 @@ export const STEALTH_CHROMIUM_ARGS: string[] = [
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage', // Critical in Docker/Render cgroups (uses /tmp instead of 64MB /dev/shm)
   '--enable-webgl',
-  '--use-gl=angle',
-  '--use-angle=swiftshader',
   '--ignore-gpu-blocklist',
   '--no-first-run',
   '--no-default-browser-check',
-  '--disable-background-networking',
-  '--disable-background-timer-throttling',
-  '--disable-backgrounding-occluded-windows',
   '--disable-breakpad',
   '--disable-component-update',
   '--disable-default-apps',
   '--disable-extensions',
-  '--disable-features=Translate,OptimizationHints,MediaRouter',
-  '--disable-ipc-flooding-protection',
-  '--disable-renderer-backgrounding',
-  '--metrics-recording-only',
   '--mute-audio',
   '--no-pings',
-  '--js-flags=--max-old-space-size=160', // Restrict V8 heap per renderer tab to 160MB
 ];
 
 export const STANDARD_DESKTOP_VIEWPORTS = [
@@ -266,19 +256,15 @@ export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean
         if (elHandle) {
           const box = await elHandle.boundingBox().catch(() => null);
           if (box && box.width > 0 && box.height > 0) {
-            // Checkbox target calculation
-            const targetX = Math.round(
-              box.x + (box.width < 150 ? box.width / 2 : 28) + (Math.random() - 0.5) * 4
-            );
-            const targetY = Math.round(
-              box.y + box.height / 2 + (Math.random() - 0.5) * 4
-            );
+            // Checkbox target calculation: center of 300x65 widget checkbox is (box.x + 28, box.y + 32)
+            const targetX = Math.round(box.x + (box.width < 150 ? box.width / 2 : 28));
+            const targetY = Math.round(box.y + (box.height > 65 ? 32 : box.height / 2));
 
-            await simulateHumanClick(page, targetX, targetY, {
-              dwellMs: 80 + Math.random() * 60,
-              holdMs: 60 + Math.random() * 40,
-            });
-
+            await page.mouse.move(targetX, targetY).catch(() => {});
+            await page.waitForTimeout(100).catch(() => {});
+            await page.mouse.down().catch(() => {});
+            await page.waitForTimeout(80).catch(() => {});
+            await page.mouse.up().catch(() => {});
             return true;
           }
         }

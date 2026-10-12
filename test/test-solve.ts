@@ -20,14 +20,21 @@ async function main() {
     console.log('Result:', res);
     if (res.ok && res.token) {
       console.log('SUCCESS! Obtained valid token:', res.token.substring(0, 40) + '...');
+      process.exitCode = 0;
     } else {
       console.log('Solve did not yield token:', res.error);
+      process.exitCode = 1;
     }
   } catch (err) {
     console.error('Error during solve execution:', err);
+    process.exitCode = 1;
   } finally {
     await BrowserManager.getInstance().close();
+    process.exit(process.exitCode ?? 0);
   }
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

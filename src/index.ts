@@ -150,9 +150,9 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const isCfManagedKey = sitekey === '0x4AAAAAAADnPIDROrmt1Wwj' || siteurl.includes('codeforces.com');
+  const isInterstitialKey = sitekey === '0x4AAAAAAADnPIDROrmt1Wwj';
   const effectiveMode: SolverMode =
-    isCfManagedKey ? 'navigate' : (mode ? mode : (sitekey ? 'harness' : 'navigate'));
+    mode ? mode : (isInterstitialKey ? 'navigate' : (sitekey ? 'harness' : 'navigate'));
 
   const abortController = new AbortController();
   req.on('close', () => {
@@ -180,14 +180,14 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 0;
     const hasCookies = !!(result.cookies && Object.keys(result.cookies).length > 0);
 
-    // Codeforces Turnstile key bypasses the challenge via clearance cookies.
-    const isCodeforces = solveReq.siteurl.includes('codeforces.com') || solveReq.sitekey === '0x4AAAAAAADnPIDROrmt1Wwj';
+    // Interstitial challenge key (0x4AAAAAAADnPIDROrmt1Wwj) or navigation-only solves succeed via clearance cookies.
+    // Form widget keys (e.g. 0x4AAAAAACDz1ltMYNJCAQZS on Codeforces problem submit) strictly require an interactive token.
+    const requiresToken = Boolean(solveReq.sitekey && solveReq.sitekey !== '0x4AAAAAAADnPIDROrmt1Wwj');
 
-    // If a sitekey is specified on generic sites, a Turnstile token is strictly required.
-    // For Codeforces, clearance cookies or token both constitute a successful solve.
     const isSuccess = result.ok && (
-      hasToken ||
-      ((!solveReq.sitekey || isCodeforces) && (hasClearance || hasCookies))
+      requiresToken
+        ? hasToken
+        : (hasToken || hasClearance || hasCookies)
     );
 
     if (isSuccess) {

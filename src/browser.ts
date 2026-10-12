@@ -117,12 +117,10 @@ export class BrowserManager {
     const context = await browser.newContext({
       viewport,
       proxy: playwrightProxy,
-      locale: 'en-US',
-      timezoneId: 'America/New_York',
       deviceScaleFactor: 1,
       hasTouch: false,
       isMobile: false,
-      userAgent,
+      ...(overrideUserAgent ? { userAgent: overrideUserAgent } : {}),
     });
 
     // 1. Inject anti-fingerprinting & stealth masks
