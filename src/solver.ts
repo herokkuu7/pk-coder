@@ -116,20 +116,6 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
     window.onTurnstileExpired = function() {
       window.__turnstileToken = null;
     };
-    window.onTurnstileLoaded = function() {
-      if (window.turnstile && typeof window.turnstile.render === 'function') {
-        try {
-          window.turnstile.render('#cf-turnstile-wrapper', {
-            sitekey: '${escapeHtml(sitekey)}',
-            action: '${escapeHtml(action || "")}',
-            cdata: '${escapeHtml(cdata || "")}',
-            callback: window.onTurnstileSuccess,
-            'error-callback': window.onTurnstileError,
-            'expired-callback': window.onTurnstileExpired,
-          });
-        } catch (e) {}
-      }
-    };
     window.addEventListener('message', function(event) {
       try {
         var data = event.data;
@@ -149,7 +135,7 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
       } catch (e) {}
     });
   </script>
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTurnstileLoaded" async defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </body>
 </html>`;
 }
@@ -447,13 +433,13 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
         break;
       }
 
-      // Budget per candidate: ensure candidate gets up to 45s if remainingTime allows,
+      // Budget per candidate: ensure candidate gets up to 55s if remainingTime allows,
       // so Cloudflare clearance / Turnstile on high-latency residential proxies has sufficient time.
       const candidateBudget = Math.min(
         remainingTime,
         attempt === proxyPool.size - 1
           ? remainingTime
-          : Math.max(45000, remainingTime - 25000),
+          : Math.max(55000, remainingTime - 20000),
       );
 
       logInfo('Attempting Turnstile solve with pool proxy', {

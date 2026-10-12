@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import cors from 'cors';
-import { config, logInfo, logError, getLogs } from './config';
+import { config, logInfo, logWarn, logError, getLogs } from './config';
 import { solveTurnstile, solverQueue, solverStats, lastDebugScreenshot } from './solver';
 import { proxyPool } from './proxyPool';
 import { BrowserManager } from './browser';
@@ -254,6 +254,11 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
 
 // Start listening if executed directly
 if (require.main === module) {
+  // Pre-warm Chromium on startup so the first request does not suffer cold start latency
+  BrowserManager.getInstance().ensureBrowser().catch((err) => {
+    logWarn('Initial browser warm-up notice', { error: String(err) });
+  });
+
   const portsToListen = new Set<number>([config.port, 10000, 3000]);
   const servers: import('http').Server[] = [];
 

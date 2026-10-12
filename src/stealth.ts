@@ -133,46 +133,6 @@ export async function applyStealthScripts(context: BrowserContext): Promise<void
         } catch {}
       });
     } catch {}
-
-    // 4. Mock WebGL vendor & renderer to match host OS cleanly
-    try {
-      const isLinux = navigator.userAgent.includes('Linux') || navigator.platform.includes('Linux');
-      const spoofVendor = isLinux ? 'Google Inc. (Intel)' : 'Google Inc. (NVIDIA)';
-      const spoofRenderer = isLinux
-        ? 'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)'
-        : 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)';
-      if (typeof WebGLRenderingContext !== 'undefined') {
-        const origGetParam = WebGLRenderingContext.prototype.getParameter;
-        WebGLRenderingContext.prototype.getParameter = function(param: number) {
-          if (param === 37445) return spoofVendor;
-          if (param === 37446) return spoofRenderer;
-          return origGetParam.apply(this, [param]);
-        };
-      }
-      if (typeof WebGL2RenderingContext !== 'undefined') {
-        const origGetParam2 = WebGL2RenderingContext.prototype.getParameter;
-        WebGL2RenderingContext.prototype.getParameter = function(param: number) {
-          if (param === 37445) return spoofVendor;
-          if (param === 37446) return spoofRenderer;
-          return origGetParam2.apply(this, [param]);
-        };
-      }
-    } catch {}
-
-    // 5. Intercept postMessage to avoid cross-origin target origin mismatch errors
-    try {
-      const origPostMessage = Window.prototype.postMessage;
-      (Window.prototype as any).postMessage = function(msg: any, targetOrigin: any, transfer?: any) {
-        const safeOrigin =
-          typeof targetOrigin === 'string' && (targetOrigin.startsWith('http') || targetOrigin.includes('cloudflare'))
-            ? '*'
-            : targetOrigin;
-        if (transfer !== undefined) {
-          return (origPostMessage as any).call(this, msg, safeOrigin, transfer);
-        }
-        return (origPostMessage as any).call(this, msg, safeOrigin);
-      };
-    } catch {}
   }).catch(() => undefined);
 }
 
