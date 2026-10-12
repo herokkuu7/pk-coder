@@ -571,8 +571,14 @@ async function solveWithHarness(
     }
   });
 
+  let fatalProxyError: string | null = null;
   page.on('requestfailed', (r) => {
-    logWarn('Harness resource load failed', { url: r.url().slice(0, 120), error: r.failure()?.errorText });
+    const err = r.failure()?.errorText || '';
+    const url = r.url();
+    logWarn('Harness resource load failed', { url: url.slice(0, 120), error: err });
+    if (url.includes('/turnstile/f/av0/rch/') && (err.includes('TIMED_OUT') || err.includes('TUNNEL') || err.includes('ABORTED'))) {
+      fatalProxyError = `Challenge iframe network failure (${err})`;
+    }
   });
   page.on('console', (msg) => {
     if (msg.type() === 'error' || msg.type() === 'warning') {
@@ -604,6 +610,11 @@ async function solveWithHarness(
     const errorMsg = await page.evaluate(
       () => (window as unknown as { __turnstileError?: string | null }).__turnstileError
     ).catch(() => null);
+
+    if (fatalProxyError && Date.now() - startTime >= 15000) {
+      logWarn('Aborting attempt early due to proxy network failure', { fatalProxyError });
+      return { error: fatalProxyError };
+    }
 
     if (errorMsg || (req.sitekey.startsWith('2x') && Date.now() - startTime >= 1500)) {
       const code = errorMsg || '300030 (always-fail test key)';
