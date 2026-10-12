@@ -61,6 +61,8 @@ export const solverQueue = new ConcurrencyQueue(
 
 export const solverStats = new SolverStatsManager();
 
+export let lastDebugScreenshot: Buffer | null = null;
+
 /**
  * Generates synthetic HTML host page with Turnstile container, callback hooks,
  * and explicit fallback render check.
@@ -75,7 +77,6 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Verification</title>
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
   <style>
     body {
       margin: 20px;
@@ -115,14 +116,28 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
     window.onTurnstileExpired = function() {
       window.__turnstileToken = null;
     };
+    window.onTurnstileLoaded = function() {
+      if (window.turnstile && typeof window.turnstile.render === 'function') {
+        try {
+          window.turnstile.render('#cf-turnstile-wrapper', {
+            sitekey: '${escapeHtml(sitekey)}',
+            action: '${escapeHtml(action || "")}',
+            cdata: '${escapeHtml(cdata || "")}',
+            callback: window.onTurnstileSuccess,
+            'error-callback': window.onTurnstileError,
+            'expired-callback': window.onTurnstileExpired,
+          });
+        } catch (e) {}
+      }
+    };
     window.addEventListener('message', function(event) {
       try {
         var data = event.data;
         if (typeof data === 'string' && data.indexOf('{') >= 0) {
-          data = JSON.parse(data);
+          try { data = JSON.parse(data); } catch(e) {}
         }
         if (data && typeof data === 'object') {
-          var tok = data.token || data.turnstileToken || data.response || (data.data && data.data.token);
+          var tok = data.token || data.turnstileToken || data.response || (data.data && (data.data.token || data.data.response));
           if (typeof tok === 'string' && tok.length > 20) {
             window.__turnstileToken = tok;
             var el1 = document.getElementById('cf-turnstile-response');
@@ -134,6 +149,7 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
       } catch (e) {}
     });
   </script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTurnstileLoaded" async defer></script>
 </body>
 </html>`;
 }
@@ -347,6 +363,9 @@ async function executeSingleSolveAttempt(
     };
   } finally {
     if (page) {
+      try {
+        lastDebugScreenshot = await page.screenshot().catch(() => null);
+      } catch {}
       await Promise.race([page.close(), new Promise((r) => setTimeout(r, 2000))]).catch(() => {});
     }
     if (context) {
@@ -587,9 +606,9 @@ async function solveWithHarness(
     }
 
     // 3. Try interactive checkbox click: click once after initial settle,
-    // and wait at least 25 seconds before any retry so Cloudflare proof-of-work is not interrupted.
+    // and wait at least 8 seconds before any retry so Cloudflare proof-of-work is not interrupted.
     const timeSinceLastClick = Date.now() - lastClickTime;
-    if (!clickAttempted || timeSinceLastClick >= 25000) {
+    if (!clickAttempted || timeSinceLastClick >= 8000) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         clickAttempted = true;

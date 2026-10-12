@@ -307,48 +307,16 @@ export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean
       }
     }
 
-    // Strategy 2: Check Turnstile container elements in the main document
-    const containerLocators = [
-      '.cf-turnstile > div > div',
-      '.cf-turnstile > div',
-      '#cf-turnstile-wrapper',
-      '.cf-turnstile',
-      'div[data-sitekey]',
-      '#turnstile-wrapper',
-      '[id^="cf-chl-widget"]',
-    ];
-
-    for (const selector of containerLocators) {
-      const loc = page.locator(selector).first();
-      if ((await loc.count().catch(() => 0)) > 0) {
-        const isVis = await loc.isVisible().catch(() => false);
-        if (isVis) {
-          const box = await loc.boundingBox().catch(() => null);
-          if (box && box.width > 0 && box.height > 0) {
-            const targetX = Math.round(
-              box.x + (box.width < 150 ? box.width / 2 : 28) + (Math.random() - 0.5) * 4
-            );
-            const targetY = Math.round(
-              box.y + (box.height > 65 ? 32 : box.height / 2) + (Math.random() - 0.5) * 4
-            );
-
-            await simulateHumanClick(page, targetX, targetY);
-            return true;
-          }
-        }
-      }
-    }
-
-    // Strategy 3: Standard iframe locator fallback
-    const iframeLoc = page.locator(
-      'iframe[src*="challenges.cloudflare.com"], iframe[src*="challenge-platform"], iframe[title*="Turnstile"], iframe[title*="Cloudflare"]'
+    // Strategy 2: Check for actual iframe inside Turnstile container
+    const containerIframe = page.locator(
+      '.cf-turnstile iframe, #cf-turnstile-wrapper iframe, [id^="cf-chl-widget"] iframe, iframe[src*="challenge"], iframe[src*="turnstile"], iframe[title*="Turnstile"], iframe[title*="Cloudflare"]'
     ).first();
-
-    if ((await iframeLoc.count().catch(() => 0)) > 0 && (await iframeLoc.isVisible().catch(() => false))) {
-      const box = await iframeLoc.boundingBox().catch(() => null);
+    if ((await containerIframe.count().catch(() => 0)) > 0) {
+      const box = await containerIframe.boundingBox().catch(() => null);
       if (box && box.width > 0 && box.height > 0) {
         const targetX = Math.round(box.x + 28);
-        const targetY = Math.round(box.y + box.height / 2);
+        const targetY = Math.round(box.y + (box.height > 65 ? 32 : box.height / 2));
+        logInfo('Clicking container iframe checkbox', { targetX, targetY, boxWidth: box.width, boxHeight: box.height });
         await simulateHumanClick(page, targetX, targetY);
         return true;
       }
