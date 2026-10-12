@@ -247,7 +247,7 @@ export async function simulateHumanMouseMove(
 }
 
 /**
- * Simulates human-like click with realistic trajectory, dwell time, and hold duration.
+ * Simulates human-like click with realistic trajectory and clean native event dispatching.
  */
 export async function simulateHumanClick(
   page: Page,
@@ -255,29 +255,10 @@ export async function simulateHumanClick(
   targetY: number,
   options: { moveSteps?: number; dwellMs?: number; holdMs?: number } = {},
 ): Promise<void> {
-  const dwellMs = options.dwellMs ?? (60 + Math.random() * 80);
-  const holdMs = options.holdMs ?? (60 + Math.random() * 50);
-
-  // 1. Move mouse to target
-  await simulateHumanMouseMove(page, targetX, targetY, options.moveSteps);
-
-  // 2. Pre-click hover dwell
-  if (dwellMs > 0) {
-    await new Promise((r) => setTimeout(r, dwellMs));
-  }
-
-  // 3. Mouse down
-  await page.mouse.down().catch(() => {});
-
-  // 4. Contact hold duration
-  if (holdMs > 0) {
-    await new Promise((r) => setTimeout(r, holdMs));
-  }
-
-  // 5. Mouse up
-  await page.mouse.up().catch(() => {});
-
-  // 6. Post-click settle
+  const steps = options.moveSteps ?? (5 + Math.floor(Math.random() * 4));
+  await page.mouse.move(targetX, targetY, { steps }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 60 + Math.random() * 60));
+  await page.mouse.click(targetX, targetY).catch(() => {});
   await new Promise((r) => setTimeout(r, 40 + Math.random() * 40));
 }
 
