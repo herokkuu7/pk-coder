@@ -3,7 +3,7 @@ import { BrowserManager } from './browser';
 import { ConcurrencyQueue } from './queue';
 import { config, logInfo, logWarn, parseProxy } from './config';
 import { proxyPool, maskProxy } from './proxyPool';
-import { interactWithTurnstileCheckbox } from './stealth';
+import { interactWithTurnstileCheckbox, isTurnstileCheckboxVisible } from './stealth';
 import type { SolveRequest, SolveResult, SolverStats, SolverMode, ProxyConfig } from './types';
 
 function escapeHtml(str: string): string {
@@ -106,25 +106,6 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
     window.onTurnstileExpired = function() {
       window.__turnstileToken = null;
     };
-    window.addEventListener('message', function(event) {
-      try {
-        var data = event.data;
-        if (typeof data === 'string' && data.indexOf('{') >= 0) {
-          try { data = JSON.parse(data); } catch(e) {}
-        }
-        if (data && typeof data === 'object') {
-          var tok = data.token || data.turnstileToken || data.response || (data.data && (data.data.token || data.data.response));
-          if (typeof tok === 'string' && tok.length > 20) {
-            window.__turnstileToken = tok;
-            try { document.title = 'TURNSTILE_TOKEN:' + tok; } catch(e) {}
-            var el1 = document.getElementById('cf-turnstile-response');
-            if (el1) el1.value = tok;
-            var el2 = document.getElementById('turnstileToken');
-            if (el2) el2.value = tok;
-          }
-        }
-      } catch (e) {}
-    });
   </script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
@@ -132,7 +113,6 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
   <div id="cf-turnstile-wrapper"
        class="cf-turnstile"
        data-sitekey="${escapeHtml(sitekey)}"${actionAttr}${cdataAttr}
-       data-response-field-name="turnstileToken"
        data-callback="onTurnstileSuccess"
        data-error-callback="onTurnstileError"
        data-expired-callback="onTurnstileExpired">
@@ -467,13 +447,13 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
         break;
       }
 
-      // Budget per candidate: ensure candidate gets up to 55s if remainingTime allows,
+      // Budget per candidate: ensure candidate gets up to 65s if remainingTime allows,
       // so Cloudflare clearance / Turnstile on high-latency residential proxies has sufficient time.
       const candidateBudget = Math.min(
         remainingTime,
         attempt === proxyPool.size - 1
           ? remainingTime
-          : Math.max(55000, remainingTime - 20000),
+          : Math.max(65000, remainingTime - 20000),
       );
 
       logInfo('Attempting Turnstile solve with pool proxy', {
@@ -568,34 +548,13 @@ async function solveWithHarness(
     return route.fallback();
   });
 
-  let networkCapturedToken: string | null = null;
-
-  page.on('response', async (res) => {
-    const url = res.url();
-    if (url.includes('challenge-platform') || url.includes('challenges.cloudflare.com')) {
-      try {
-        const text = await res.text().catch(() => '');
-        if (text && (text.includes('"token"') || text.includes('"turnstileToken"') || text.includes('"value"'))) {
-          const match = text.match(/"(?:turnstileToken|token|value|response)"\s*:\s*"([^"]{20,})"/);
-          if (match && match[1] && (match[1].startsWith('0.') || match[1].length > 40)) {
-            logInfo('Turnstile token intercepted directly from challenge network response!', {
-              tokenLength: match[1].length,
-              url: url.slice(0, 100),
-            });
-            networkCapturedToken = match[1];
-          }
-        }
-      } catch {}
-    }
-  });
-
   let fatalProxyError: string | null = null;
   page.on('requestfailed', (r) => {
     const err = r.failure()?.errorText || '';
     const url = r.url();
     if (url.includes('brunhild.challenges.cloudflare.com')) return;
     logWarn('Harness resource load failed', { url: url.slice(0, 120), error: err });
-    if (url.includes('/turnstile/f/av0/rch/') && (err.includes('TIMED_OUT') || err.includes('TUNNEL') || err.includes('ABORTED'))) {
+    if (url.includes('/turnstile/f/av0/rch/') && (err.includes('TIMED_OUT') || err.includes('TUNNEL'))) {
       fatalProxyError = `Challenge iframe network failure (${err})`;
     }
   });
@@ -611,16 +570,14 @@ async function solveWithHarness(
   });
 
   const deadline = startTime + timeoutMs;
-  let clickAttempted = false;
+  let clickCount = 0;
   let lastClickTime = 0;
 
   // Allow Turnstile API script and container iframe to mount and stabilize
-  await page.waitForTimeout(2000).catch(() => {});
+  await page.waitForTimeout(2500).catch(() => {});
 
   while (Date.now() < deadline) {
     signal.throwIfAborted();
-    // 0. Check network intercepted token first
-    if (networkCapturedToken) return { token: networkCapturedToken };
 
     // 1. Check for resolved token on page
     const token = await extractTokenFromPage(page);
@@ -642,14 +599,19 @@ async function solveWithHarness(
       return { error: `Cloudflare Turnstile error code: ${code}` };
     }
 
-    // 3. Try interactive checkbox click: wait at least 4000ms for challenge iframe to fully mount and settle, and click ONCE.
-    // Cloudflare Turnstile Proof-of-Work takes 8-35 seconds depending on hardware & proxy.
-    // NEVER re-click while evaluation is in progress (it resets the PoW computation, causes postMessage origin mismatch, and triggers bot detection).
+    // 3. Check if challenge frame has presented the interactive checkbox
+    const isInteractiveReady = await isTurnstileCheckboxVisible(page);
     const elapsed = Date.now() - startTime;
-    if (elapsed >= 4000 && !clickAttempted) {
+
+    // Click as soon as the checkbox is visible, or after 35s as an edge-case fallback
+    const shouldClick =
+      (clickCount === 0 && (isInteractiveReady || elapsed >= 35000)) ||
+      (clickCount === 1 && Date.now() - lastClickTime >= 15000 && isInteractiveReady);
+
+    if (shouldClick) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
-        clickAttempted = true;
+        clickCount += 1;
         lastClickTime = Date.now();
       }
     }
@@ -725,8 +687,10 @@ async function solveWithNavigation(
       return { cfClearance: 'cleared' };
     }
 
-    // 4. Intelligent pacing: wait at least 4s for challenge settling, and click once
-    if (elapsed >= 4000 && !lastClickTime) {
+    // 4. Intelligent pacing: wait for challenge settling, and click once interactive checkbox appears
+    const isInteractiveReady = await isTurnstileCheckboxVisible(page);
+
+    if (!lastClickTime && (isInteractiveReady || elapsed >= 35000)) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         lastClickTime = Date.now();

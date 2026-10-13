@@ -17,7 +17,7 @@ async function main() {
       siteurl: targetUrl,
       sitekey: targetSitekey,
       proxy: targetProxy,
-      timeout: 35000,
+      timeout: 70000,
     });
 
     console.log('Result:', res);

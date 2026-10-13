@@ -131,6 +131,20 @@ export async function simulateHumanClick(
 }
 
 /**
+ * Checks whether the Turnstile challenge checkbox inside the Cloudflare iframe has become visible.
+ * Uses Playwright's frameLocator to inspect visibility natively without injecting scripts into the frame.
+ */
+export async function isTurnstileCheckboxVisible(page: Page): Promise<boolean> {
+  try {
+    const fl = page.frameLocator('iframe[src*="challenges.cloudflare.com"], iframe[src*="challenge-platform"]');
+    const checkbox = fl.locator('input[type="checkbox"]').first();
+    return await checkbox.isVisible().catch(() => false);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Detects Cloudflare Turnstile challenge iframes (including those enclosed in closed shadow DOM)
  * and performs a human-like cursor approach and click on the verification checkbox.
  */
@@ -149,17 +163,11 @@ export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean
 
     // 2. Locate challenge iframe bounding box first, falling back to container
     const iframe = page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="challenge-platform"]').first();
-    const iframeBox = await Promise.race([
-      iframe.boundingBox(),
-      new Promise<null>((r) => setTimeout(() => r(null), 1500)),
-    ]).catch(() => null);
+    const iframeBox = await iframe.boundingBox().catch(() => null);
 
     const box = (iframeBox && iframeBox.width > 0 && iframeBox.height > 0)
       ? iframeBox
-      : await Promise.race([
-          page.locator('#cf-turnstile-wrapper, .cf-turnstile, [data-sitekey]').first().boundingBox(),
-          new Promise<null>((r) => setTimeout(() => r(null), 1000)),
-        ]).catch(() => null);
+      : await page.locator('#cf-turnstile-wrapper, .cf-turnstile, [data-sitekey]').first().boundingBox().catch(() => null);
 
     if (box && box.width > 0 && box.height > 0) {
       const targetX = Math.round(box.x + 28);
