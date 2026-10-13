@@ -147,12 +147,19 @@ export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean
       return false;
     }
 
-    // 2. Locate container or iframe bounding box
-    const container = page.locator('#cf-turnstile-wrapper, .cf-turnstile, [data-sitekey]').first();
-    const box = await Promise.race([
-      container.boundingBox(),
-      new Promise<null>((r) => setTimeout(() => r(null), 1000)),
+    // 2. Locate challenge iframe bounding box first, falling back to container
+    const iframe = page.locator('iframe[src*="challenges.cloudflare.com"], iframe[src*="challenge-platform"]').first();
+    const iframeBox = await Promise.race([
+      iframe.boundingBox(),
+      new Promise<null>((r) => setTimeout(() => r(null), 1500)),
     ]).catch(() => null);
+
+    const box = (iframeBox && iframeBox.width > 0 && iframeBox.height > 0)
+      ? iframeBox
+      : await Promise.race([
+          page.locator('#cf-turnstile-wrapper, .cf-turnstile, [data-sitekey]').first().boundingBox(),
+          new Promise<null>((r) => setTimeout(() => r(null), 1000)),
+        ]).catch(() => null);
 
     if (box && box.width > 0 && box.height > 0) {
       const targetX = Math.round(box.x + 28);
@@ -162,6 +169,7 @@ export async function interactWithTurnstileCheckbox(page: Page): Promise<boolean
         targetY,
         boxWidth: box.width,
         boxHeight: box.height,
+        isIframeBox: box === iframeBox,
         frameUrl: challengeFrame.url().slice(0, 100),
       });
       await simulateHumanClick(page, targetX, targetY);

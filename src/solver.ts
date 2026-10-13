@@ -185,8 +185,11 @@ async function extractTokenFromPage(page: Page): Promise<string | null> {
 
   if (fromEval) return fromEval;
 
-  // Search all child frames for token in inputs or window properties
+  // Search non-Cloudflare child frames for token (do not inject scripts into Cloudflare's security frame)
   for (const f of page.frames()) {
+    if (f === page.mainFrame()) continue;
+    const frameUrl = f.url().toLowerCase();
+    if (frameUrl.includes('challenges.cloudflare.com') || frameUrl.includes('challenge-platform')) continue;
     try {
       const frameVal = await f.evaluate(() => {
         const win = window as any;
@@ -639,12 +642,11 @@ async function solveWithHarness(
       return { error: `Cloudflare Turnstile error code: ${code}` };
     }
 
-    // 3. Try interactive checkbox click: click once after initial settle (at least 2000ms).
+    // 3. Try interactive checkbox click: wait at least 4000ms for challenge iframe to fully mount and settle, and click ONCE.
     // Cloudflare Turnstile Proof-of-Work takes 8-35 seconds depending on hardware & proxy.
-    // NEVER re-click while evaluation is in progress (it resets the PoW computation and flags bot behavior).
+    // NEVER re-click while evaluation is in progress (it resets the PoW computation, causes postMessage origin mismatch, and triggers bot detection).
     const elapsed = Date.now() - startTime;
-    const timeSinceLastClick = Date.now() - lastClickTime;
-    if ((!clickAttempted && elapsed >= 2000) || (clickAttempted && timeSinceLastClick >= 8000)) {
+    if (elapsed >= 4000 && !clickAttempted) {
       const clicked = await interactWithTurnstileCheckbox(page);
       if (clicked) {
         clickAttempted = true;
