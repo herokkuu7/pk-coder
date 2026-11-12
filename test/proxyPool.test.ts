@@ -88,6 +88,9 @@ async function runProxyPoolTests() {
 
   // Test 6: HTTP Telemetry Endpoints
   console.log('[Test 6] Testing HTTP telemetry endpoints (/proxies, /proxies/rotate, /health)...');
+  const prevToken = process.env.CPSOLVER_API_TOKEN;
+  process.env.CPSOLVER_API_TOKEN = 'pool_test_api_token_12345';
+  const authHeaders = { Authorization: 'Bearer pool_test_api_token_12345' };
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
@@ -104,8 +107,10 @@ async function runProxyPoolTests() {
     assert.equal(healthJson.proxyPool.activeIndex, 0);
     console.log('✓ GET /health reports proxyPool stats');
 
-    // 6.2 GET /proxies
-    const proxiesRes = await fetch(`${baseUrl}/proxies`);
+    // 6.2 GET /proxies (unauthenticated rejected, authenticated allowed)
+    const unauthRes = await fetch(`${baseUrl}/proxies`);
+    assert.equal(unauthRes.status, 401);
+    const proxiesRes = await fetch(`${baseUrl}/proxies`, { headers: authHeaders });
     assert.equal(proxiesRes.status, 200);
     const proxiesJson = await proxiesRes.json() as Record<string, any>;
     assert.equal(proxiesJson.total, 3);
@@ -114,7 +119,7 @@ async function runProxyPoolTests() {
     console.log('✓ GET /proxies returns full pool status');
 
     // 6.3 POST /proxies/rotate
-    const rotateRes = await fetch(`${baseUrl}/proxies/rotate`, { method: 'POST' });
+    const rotateRes = await fetch(`${baseUrl}/proxies/rotate`, { method: 'POST', headers: authHeaders });
     assert.equal(rotateRes.status, 200);
     const rotateJson = await rotateRes.json() as Record<string, any>;
     assert.equal(rotateJson.ok, true);
@@ -122,13 +127,15 @@ async function runProxyPoolTests() {
     console.log('✓ POST /proxies/rotate successfully rotates proxy');
 
     // 6.4 POST /proxies/reset
-    const resetRes = await fetch(`${baseUrl}/proxies/reset`, { method: 'POST' });
+    const resetRes = await fetch(`${baseUrl}/proxies/reset`, { method: 'POST', headers: authHeaders });
     assert.equal(resetRes.status, 200);
     const resetJson = await resetRes.json() as Record<string, any>;
     assert.equal(resetJson.ok, true);
     assert.equal(resetJson.activeIndex, 0);
     console.log('✓ POST /proxies/reset resets to index 0');
   } finally {
+    if (prevToken === undefined) delete process.env.CPSOLVER_API_TOKEN;
+    else process.env.CPSOLVER_API_TOKEN = prevToken;
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });

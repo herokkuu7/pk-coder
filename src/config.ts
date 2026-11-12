@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ProxyConfig } from './types';
+import { sanitizeLogMeta } from './security';
 
 dotenv.config();
 
@@ -99,21 +100,24 @@ export function getLogs(limit = 100): LogEntry[] {
 
 export function logInfo(msg: string, meta?: Record<string, unknown>): void {
   const ts = new Date().toISOString();
-  const entry: LogEntry = { time: ts, level: 'INFO', msg, ...meta, ...requestLogContext.getStore() };
+  const safeMeta = sanitizeLogMeta(meta);
+  const entry: LogEntry = { time: ts, level: 'INFO', msg, ...safeMeta, ...requestLogContext.getStore() };
   pushLog(entry);
   process.stdout.write(JSON.stringify(entry) + '\n');
 }
 
 export function logWarn(msg: string, meta?: Record<string, unknown>): void {
   const ts = new Date().toISOString();
-  const entry: LogEntry = { time: ts, level: 'WARN', msg, ...meta, ...requestLogContext.getStore() };
+  const safeMeta = sanitizeLogMeta(meta);
+  const entry: LogEntry = { time: ts, level: 'WARN', msg, ...safeMeta, ...requestLogContext.getStore() };
   pushLog(entry);
   process.stdout.write(JSON.stringify(entry) + '\n');
 }
 
 export function logError(msg: string, meta?: Record<string, unknown>): void {
   const ts = new Date().toISOString();
-  const entry: LogEntry = { time: ts, level: 'ERROR', msg, ...meta, ...requestLogContext.getStore() };
+  const safeMeta = sanitizeLogMeta(meta);
+  const entry: LogEntry = { time: ts, level: 'ERROR', msg, ...safeMeta, ...requestLogContext.getStore() };
   pushLog(entry);
   process.stderr.write(JSON.stringify(entry) + '\n');
 }

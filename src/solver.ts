@@ -3,8 +3,9 @@ import { BrowserManager } from './browser';
 import { ConcurrencyQueue } from './queue';
 import { config, logInfo, logWarn, parseProxy } from './config';
 import { proxyPool, maskProxy } from './proxyPool';
+import { validateTargetUrl } from './security';
 import { interactWithTurnstileCheckbox, isTurnstileCheckboxVisible } from './stealth';
-import type { SolveRequest, SolveResult, SolverStats, SolverMode, ProxyConfig } from './types';
+import type { SolveRequest, SolveResult, SolveState, SolverStats, SolverMode, ProxyConfig } from './types';
 
 function escapeHtml(str: string): string {
   return str
@@ -105,6 +106,11 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
     };
     window.onTurnstileExpired = function() {
       window.__turnstileToken = null;
+      try { document.title = 'Verification'; } catch(e) {}
+      var el1 = document.getElementById('cf-turnstile-response');
+      if (el1) el1.value = '';
+      var el2 = document.getElementById('turnstileToken');
+      if (el2) el2.value = '';
     };
   </script>
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
@@ -238,7 +244,7 @@ async function executeSingleSolveAttempt(
       sitekey: req.sitekey,
       mode,
       hasProxy: !!proxyConfig?.server,
-      proxyServer: proxyConfig?.server,
+      proxyServer: proxyConfig?.server ? maskProxy(proxyConfig.server) : undefined,
     });
 
     context = await browserManager.createContext(proxyConfig, req.userAgent);
@@ -277,11 +283,14 @@ async function executeSingleSolveAttempt(
     page.setDefaultTimeout(timeoutMs);
 
     let stepResult: StepSolveResult;
+    let activeMode: SolverMode = mode;
 
     if (mode === 'harness' && req.sitekey) {
       stepResult = await solveWithHarness(page, req, timeoutMs, attemptStartTime, signal);
       if (stepResult.error?.includes('600010')) {
         logInfo('Harness mode encountered 600010 (interstitial key), falling back to navigation mode', { siteurl: req.siteurl });
+        await page.unroute('**/*').catch(() => {});
+        activeMode = 'navigate';
         stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal);
       }
     } else {
@@ -307,8 +316,12 @@ async function executeSingleSolveAttempt(
 
     const durationMs = Date.now() - attemptStartTime;
 
+    const resolvedClearance =
+      stepResult.cfClearance && stepResult.cfClearance !== 'cleared'
+        ? stepResult.cfClearance
+        : cfClearance;
     const hasValidToken = typeof stepResult.token === 'string' && stepResult.token.trim().length > 10;
-    const hasClearance = !!(stepResult.cfClearance || cfClearance);
+    const hasClearance = Boolean(resolvedClearance && resolvedClearance.trim().length > 5);
     const hasCookies = !!(cookiesRecord && Object.keys(cookiesRecord).some((k) => k.toLowerCase().startsWith('cf_')));
 
     // Interstitial challenge key (0x4AAAAAAADnPIDROrmt1Wwj) only needs clearance cookies.
@@ -328,32 +341,41 @@ async function executeSingleSolveAttempt(
 
       return {
         ok: true,
+        state: 'VERIFICATION_COMPLETED',
         token: stepResult.token,
         cookies: cookiesRecord,
-        cfClearance: stepResult.cfClearance || cfClearance,
+        cfClearance: resolvedClearance,
         durationMs,
-        modeUsed: mode,
+        modeUsed: activeMode,
       };
     }
 
+    const failError = stepResult.error || (req.sitekey ? 'Turnstile widget did not issue a token before timeout' : `Challenge timed out after ${timeoutMs}ms without clearance`);
+    const failState: SolveState = /timed out/i.test(failError) ? 'TIMED_OUT' : 'VERIFICATION_FAILED';
     return {
       ok: false,
+      state: failState,
       durationMs,
-      error: stepResult.error || (req.sitekey ? 'Turnstile widget did not issue a token before timeout' : `Challenge timed out after ${timeoutMs}ms without clearance`),
-      modeUsed: mode,
+      error: failError,
+      modeUsed: activeMode,
     };
   } catch (err) {
     const durationMs = Date.now() - attemptStartTime;
     const message = err instanceof Error ? err.message : String(err);
+    const errState: SolveState = signal.aborted
+      ? 'CANCELLED'
+      : (/timed out/i.test(message) ? 'TIMED_OUT' : 'VERIFICATION_FAILED');
 
     logWarn('Turnstile solve attempt failed with error', {
       siteurl: req.siteurl,
       durationMs,
+      state: errState,
       error: message,
     });
 
     return {
       ok: false,
+      state: errState,
       durationMs,
       error: message,
       modeUsed: mode,
@@ -632,9 +654,18 @@ async function solveWithNavigation(
   startTime: number,
   signal: AbortSignal,
 ): Promise<StepSolveResult> {
-  // Abort non-essential media assets
-  await page.route('**/*', (route) => {
-    const url = route.request().url();
+  // Abort non-essential media assets and validate any top-level navigation redirects against SSRF rules
+  await page.route('**/*', async (route) => {
+    const request = route.request();
+    const url = request.url();
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      const destCheck = await validateTargetUrl(url);
+      if (!destCheck.ok) {
+        logWarn('Blocked unsafe navigation redirect destination', { url: url.slice(0, 120), reason: destCheck.error });
+        await route.abort('blockedbyclient').catch(() => {});
+        return;
+      }
+    }
     if (/\.(png|jpg|jpeg|gif|webp|ico|svg|woff|woff2|ttf|mp4|webm|avi|mp3)(\?.*)?$/i.test(url)) {
       return route.abort();
     }
@@ -648,6 +679,8 @@ async function solveWithNavigation(
 
   const deadline = startTime + timeoutMs;
   let lastClickTime = 0;
+  const isInterstitialKey = req.sitekey === '0x4AAAAAAADnPIDROrmt1Wwj';
+  const requiresToken = Boolean(req.sitekey && !isInterstitialKey);
 
   while (Date.now() < deadline) {
     signal.throwIfAborted();
@@ -658,20 +691,16 @@ async function solveWithNavigation(
     // 2. Check if cf_clearance was issued (real cookie value)
     const cookies = await page.context().cookies().catch(() => []);
     const cfCookie = cookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
-    if (cfCookie) {
-      if (!req.sitekey || req.siteurl.includes('codeforces.com')) {
-        return { cfClearance: cfCookie.value };
-      }
-      // When sitekey is present on third-party sites, clearance is step 1; continue in loop to get the widget token
+    if (cfCookie && !requiresToken) {
+      return { cfClearance: cfCookie.value };
     }
 
     // 3. Check if page transitioned away from Cloudflare challenge page
     const title = await page.title().catch(() => '');
     const url = page.url();
     const elapsed = Date.now() - startTime;
-    const isCodeforces = req.siteurl.includes('codeforces.com');
     if (
-      (!req.sitekey || isCodeforces) &&
+      !requiresToken &&
       elapsed > 4000 &&
       !title.toLowerCase().includes('just a moment') &&
       !url.includes('__cf_chl_rt_tk')
@@ -683,8 +712,6 @@ async function solveWithNavigation(
       const freshCookies = await page.context().cookies().catch(() => []);
       const freshCf = freshCookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
       if (freshCf) return { cfClearance: freshCf.value };
-      // Page cleared but no explicit cookie — return 'cleared' as sentinel (handled upstream)
-      return { cfClearance: 'cleared' };
     }
 
     // 4. Intelligent pacing: wait for challenge settling, and click once interactive checkbox appears
@@ -704,7 +731,7 @@ async function solveWithNavigation(
   const finalToken = await extractTokenFromPage(page);
   if (finalToken) return { token: finalToken };
 
-  if (!req.sitekey || req.siteurl.includes('codeforces.com')) {
+  if (!requiresToken) {
     const finalCookies = await page.context().cookies().catch(() => []);
     const finalCf = finalCookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
     if (finalCf) {

@@ -2,10 +2,17 @@ import { chromium } from 'patchright';
 import { solveTurnstile } from '../src/solver';
 import { applyStealthScripts } from '../src/stealth';
 
-const PROXY =
-  'http://customer-jp-lmc6hb64r-cc-in-iptype-residential-sessid-ylvk7rom-sesstime-1-backup-1:kdKWYXp9PFrh@gate.joyproxy.com:9001';
+const PROXY = process.env.TEST_PROXY_URL || '';
 
 async function main() {
+  if (!PROXY) {
+    throw new Error('TEST_PROXY_URL environment variable is required.');
+  }
+  const handle = process.env.CF_HANDLE;
+  const password = process.env.CF_PASSWORD;
+  if (!handle || !password) {
+    throw new Error('CF_HANDLE and CF_PASSWORD environment variables are required.');
+  }
   console.log('=== Step 1: Solving Codeforces Interstitial with Solver ===');
   const solveRes = await solveTurnstile({
     siteurl: 'https://codeforces.com/enter',
@@ -87,9 +94,9 @@ async function main() {
   console.log('Is #handleOrEmail visible directly?:', visible);
 
   if (visible) {
-    console.log('=== Step 3: Submitting Credentials for gogo_124 ===');
-    await handleInput.fill('gogo_124');
-    await page.locator('#password').fill('q1w2e3r4t5@67890');
+    console.log(`=== Step 3: Submitting Credentials for ${handle} ===`);
+    await handleInput.fill(handle);
+    await page.locator('#password').fill(password);
 
     const remember = page.locator('#remember');
     if ((await remember.count()) > 0) {
@@ -103,8 +110,8 @@ async function main() {
     console.log('URL after login:', page.url());
     console.log('Title after login:', await page.title());
     const content = await page.content();
-    const isLogged = content.includes('gogo_124');
-    console.log('Is gogo_124 logged in?:', isLogged);
+    const isLogged = content.includes(handle);
+    console.log(`Is ${handle} logged in?:`, isLogged);
 
     console.log('=== Step 4: Navigating to Submit Page ===');
     await page.goto('https://codeforces.com/problemset/submit', {

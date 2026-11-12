@@ -68,8 +68,11 @@ async function main() {
   await handleInput.waitFor({ state: 'visible', timeout: 15000 }).catch(() => null);
 
   if (await handleInput.isVisible()) {
-    const handle = process.env.CF_HANDLE || 'gogo_124';
-    const password = process.env.CF_PASSWORD || 'q1w2e3r4t5@67890';
+    const handle = process.env.CF_HANDLE;
+    const password = process.env.CF_PASSWORD;
+    if (!handle || !password) {
+      throw new Error('CF_HANDLE and CF_PASSWORD environment variables are required.');
+    }
     console.log(`SUCCESS: Login form is visible! Filling credentials for ${handle}...`);
     await handleInput.fill(handle);
     await page.locator('#password').fill(password);
@@ -89,9 +92,9 @@ async function main() {
     console.log('URL after login:', page.url());
     console.log('Title after login:', await page.title());
 
-    const isLogged = (await page.content()).includes('gogo_124');
+    const isLogged = (await page.content()).includes(handle);
     console.log('=== Login Status ===');
-    console.log('Is gogo_124 logged in?:', isLogged);
+    console.log(`Is ${handle} logged in?:`, isLogged);
 
     console.log('=== Step 4: Navigating to https://codeforces.com/problemset/submit ===');
     await page.goto('https://codeforces.com/problemset/submit', {

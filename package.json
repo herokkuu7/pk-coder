@@ -8,7 +8,9 @@
     "build": "tsc",
     "start": "node dist/src/index.js",
     "dev": "tsx watch src/index.ts",
-    "test": "tsx test/sanity.test.ts",
+    "test": "tsx test/securityAndContract.test.ts",
+    "test:security": "tsx test/securityAndContract.test.ts",
+    "test:sanity": "tsx test/sanity.test.ts",
     "test:dist": "node dist/test/sanity.test.js",
     "test:pool": "tsx test/proxyPool.test.ts",
     "test:solve": "tsx test/test-solve.ts"

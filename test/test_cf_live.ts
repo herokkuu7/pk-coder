@@ -47,9 +47,14 @@ async function main() {
   await handleInput.waitFor({ state: 'visible', timeout: 10000 }).catch(() => null);
 
   if (await handleInput.isVisible()) {
-    console.log('Filling credentials for gogo_124...');
-    await handleInput.fill('gogo_124');
-    await page.locator('#password').fill('q1w2e3r4t5@67890');
+    const handle = process.env.CF_HANDLE;
+    const password = process.env.CF_PASSWORD;
+    if (!handle || !password) {
+      throw new Error('CF_HANDLE and CF_PASSWORD environment variables are required.');
+    }
+    console.log(`Filling credentials for ${handle}...`);
+    await handleInput.fill(handle);
+    await page.locator('#password').fill(password);
 
     const remember = page.locator('#remember');
     if ((await remember.count()) > 0) {
@@ -66,8 +71,8 @@ async function main() {
     console.log('After login URL:', page.url());
     console.log('After login Title:', await page.title());
     const content = await page.content();
-    const isLogged = content.includes('gogo_124');
-    console.log('Is gogo_124 logged in?:', isLogged);
+    const isLogged = content.includes(handle);
+    console.log(`Is ${handle} logged in?:`, isLogged);
 
     console.log('=== Step 4: Navigating to Problemset Submit ===');
     await page.goto('https://codeforces.com/problemset/submit', {

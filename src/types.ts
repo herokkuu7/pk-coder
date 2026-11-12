@@ -6,6 +6,16 @@ export interface ProxyConfig {
 
 export type SolverMode = 'harness' | 'navigate';
 
+export type SolveState =
+  | 'REQUEST_ACCEPTED'
+  | 'BROWSER_STARTED'
+  | 'CHALLENGE_OBSERVED'
+  | 'VERIFICATION_PENDING'
+  | 'VERIFICATION_COMPLETED'
+  | 'VERIFICATION_FAILED'
+  | 'TIMED_OUT'
+  | 'CANCELLED';
+
 export interface SolveRequest {
   siteurl: string;
   sitekey?: string;
@@ -20,6 +30,7 @@ export interface SolveRequest {
 
 export interface SolveResult {
   ok: boolean;
+  state?: SolveState;
   token?: string;
   cookies?: Record<string, string>;
   cfClearance?: string;

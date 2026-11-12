@@ -6,11 +6,13 @@ import { solveTurnstile, solverQueue, solverStats, lastDebugScreenshot } from '.
 import { proxyPool } from './proxyPool';
 import { BrowserManager } from './browser';
 import { QueueFullError } from './queue';
+import { buildCorsOptions, requireApiAuth, validateTargetUrl } from './security';
 import type { SolveRequest, HealthResponse, SolverMode } from './types';
 
 export const app = express();
+const inFlightRequestIds = new Set<string>();
 
-app.use(cors());
+app.use(cors(buildCorsOptions()));
 app.use(express.json({ limit: '1mb' }));
 app.use('/solve', (req, res, next) => {
   const supplied = req.header('x-request-id');
@@ -24,7 +26,7 @@ app.use('/solve', (req, res, next) => {
     if (!res.writableEnded) logWarn('Solve client disconnected', { requestId, durationMs: Date.now() - startedAt });
   });
   requestLogContext.run({ requestId }, () => {
-    logInfo('Solve HTTP request received', { mode: req.body?.mode, requiresToken: !!req.body?.sitekey });
+    logInfo('Solve HTTP request received', { mode: req.body?.mode, sitekeyPresent: !!req.body?.sitekey });
     next();
   });
 });
@@ -32,7 +34,7 @@ app.use('/solve', (req, res, next) => {
 /**
  * Public IP check endpoint.
  */
-app.get('/ip', async (_req: Request, res: Response) => {
+app.get('/ip', requireApiAuth, async (_req: Request, res: Response) => {
   try {
     const ip = await fetch('https://api.ipify.org').then((r) => r.text());
     res.status(200).json({ ip });
@@ -44,7 +46,7 @@ app.get('/ip', async (_req: Request, res: Response) => {
 /**
  * Real-time PNG screenshot of latest browser page state.
  */
-app.get('/screenshot', (_req: Request, res: Response) => {
+app.get('/screenshot', requireApiAuth, (_req: Request, res: Response) => {
   if (!lastDebugScreenshot) {
     res.status(404).send('No debug screenshot captured yet');
     return;
@@ -92,14 +94,14 @@ app.get(['/health', '/'], (_req: Request, res: Response) => {
 /**
  * Proxy pool telemetry endpoint.
  */
-app.get('/proxies', (_req: Request, res: Response) => {
+app.get('/proxies', requireApiAuth, (_req: Request, res: Response) => {
   res.status(200).json(proxyPool.getStatus());
 });
 
 /**
  * Manually rotate to next proxy in pool.
  */
-app.post('/proxies/rotate', (_req: Request, res: Response) => {
+app.post('/proxies/rotate', requireApiAuth, (_req: Request, res: Response) => {
   const rotated = proxyPool.rotateToNext();
   res.status(200).json({ ok: true, activeIndex: rotated.index, activeProxy: rotated.masked });
 });
@@ -107,7 +109,7 @@ app.post('/proxies/rotate', (_req: Request, res: Response) => {
 /**
  * Reset proxy pool index to first proxy (index 0).
  */
-app.post('/proxies/reset', (_req: Request, res: Response) => {
+app.post('/proxies/reset', requireApiAuth, (_req: Request, res: Response) => {
   proxyPool.resetToFirst();
   res.status(200).json({ ok: true, activeIndex: 0, activeProxy: proxyPool.getStatus().activeMasked });
 });
@@ -115,7 +117,7 @@ app.post('/proxies/reset', (_req: Request, res: Response) => {
 /**
  * Statistics endpoint for telemetry and monitoring.
  */
-app.get('/stats', (_req: Request, res: Response) => {
+app.get('/stats', requireApiAuth, (_req: Request, res: Response) => {
   const browserManager = BrowserManager.getInstance();
   const stats = solverStats.getStats(
     solverQueue.active,
@@ -128,7 +130,7 @@ app.get('/stats', (_req: Request, res: Response) => {
 /**
  * In-memory log buffer endpoint for Render debugging and real-time telemetry.
  */
-app.get('/logs', (req: Request, res: Response) => {
+app.get('/logs', requireApiAuth, (req: Request, res: Response) => {
   const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || '100', 10)));
   const logs = getLogs(limit);
   if (req.query.format === 'text') {
@@ -160,36 +162,63 @@ app.get('/logs', (req: Request, res: Response) => {
  *   "durationMs": 3410
  * }
  */
-app.post('/solve', async (req: Request, res: Response): Promise<void> => {
+app.post('/solve', requireApiAuth, async (req: Request, res: Response): Promise<void> => {
   const body = req.body as Partial<SolveRequest>;
 
-  if (!body || typeof body !== 'object') {
-    res.status(400).json({ ok: false, error: 'Missing JSON request body' });
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    res.status(400).json({ ok: false, state: 'VERIFICATION_FAILED', error: 'Missing JSON request body' });
     return;
   }
 
   const { siteurl, sitekey, action, cdata, proxy, timeout, mode, userAgent, cookies } = body;
 
-  if (!siteurl || typeof siteurl !== 'string') {
-    res.status(400).json({ ok: false, error: 'Missing or invalid "siteurl" parameter' });
+  if (!siteurl || typeof siteurl !== 'string' || !siteurl.trim()) {
+    res.status(400).json({ ok: false, state: 'VERIFICATION_FAILED', error: 'Missing or invalid "siteurl" parameter' });
     return;
   }
 
-  try {
-    const parsedUrl = new URL(siteurl);
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      res.status(400).json({ ok: false, error: '"siteurl" must use http or https protocol' });
-      return;
-    }
-  } catch {
-    res.status(400).json({ ok: false, error: 'Invalid URL string for "siteurl"' });
+  const urlCheck = await validateTargetUrl(siteurl);
+  if (!urlCheck.ok) {
+    res.status(urlCheck.statusCode ?? 400).json({
+      ok: false,
+      state: 'VERIFICATION_FAILED',
+      error: urlCheck.error || 'Blocked or invalid "siteurl"',
+    });
     return;
   }
 
   if (sitekey !== undefined && (typeof sitekey !== 'string' || !sitekey.trim())) {
-    res.status(400).json({ ok: false, error: 'Missing or invalid "sitekey" parameter' });
+    res.status(400).json({ ok: false, state: 'VERIFICATION_FAILED', error: 'Missing or invalid "sitekey" parameter' });
     return;
   }
+
+  if (mode !== undefined && mode !== 'harness' && mode !== 'navigate') {
+    res.status(400).json({ ok: false, state: 'VERIFICATION_FAILED', error: 'Invalid "mode" parameter (expected "harness" or "navigate")' });
+    return;
+  }
+
+  if (timeout !== undefined && (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout < 1000 || timeout > 180_000)) {
+    res.status(400).json({ ok: false, state: 'VERIFICATION_FAILED', error: 'Invalid "timeout" parameter (expected 1000..180000 ms)' });
+    return;
+  }
+
+  if (proxy !== undefined && typeof proxy !== 'string' && (typeof proxy !== 'object' || proxy === null || Array.isArray(proxy) || typeof (proxy as any).server !== 'string')) {
+    res.status(400).json({ ok: false, state: 'VERIFICATION_FAILED', error: 'Invalid "proxy" parameter' });
+    return;
+  }
+
+  if (cookies !== undefined && (typeof cookies !== 'object' || cookies === null)) {
+    res.status(400).json({ ok: false, state: 'VERIFICATION_FAILED', error: 'Invalid "cookies" parameter' });
+    return;
+  }
+
+  const requestId = res.getHeader('x-request-id');
+  const idKey = typeof requestId === 'string' && req.header('x-request-id') ? requestId : null;
+  if (idKey && inFlightRequestIds.has(idKey)) {
+    res.status(409).json({ ok: false, state: 'VERIFICATION_FAILED', error: `Duplicate active operation for x-request-id=${idKey}` });
+    return;
+  }
+  if (idKey) inFlightRequestIds.add(idKey);
 
   const isInterstitialKey = sitekey === '0x4AAAAAAADnPIDROrmt1Wwj';
   const effectiveMode: SolverMode =
@@ -217,11 +246,11 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     };
 
     const result = await solveTurnstile(solveReq, abortController.signal);
-    logInfo('Solve operation finished', { ok: result.ok, mode: result.modeUsed, durationMs: result.durationMs });
+    logInfo('Solve operation finished', { ok: result.ok, state: result.state, mode: result.modeUsed, durationMs: result.durationMs });
     if (res.destroyed) return;
 
     const hasToken = typeof result.token === 'string' && result.token.trim().length > 10;
-    const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 0;
+    const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 5 && result.cfClearance !== 'cleared';
     const hasCookies = !!(result.cookies && Object.keys(result.cookies).length > 0);
 
     // Interstitial challenge key (0x4AAAAAAADnPIDROrmt1Wwj) or navigation-only solves succeed via clearance cookies.
@@ -237,9 +266,10 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     if (isSuccess) {
       res.status(200).json({
         ok: true,
+        state: result.state ?? 'VERIFICATION_COMPLETED',
         token: result.token,
         cookies: result.cookies,
-        cfClearance: result.cfClearance,
+        cfClearance: hasClearance ? result.cfClearance : undefined,
         durationMs: result.durationMs,
         modeUsed: result.modeUsed,
         proxyUsed: result.proxyUsed,
@@ -248,8 +278,10 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     }
 
     const statusCode = result.error?.includes('timed out') ? 408 : 422;
+    const failureState = result.state ?? (statusCode === 408 ? 'TIMED_OUT' : 'VERIFICATION_FAILED');
     res.status(statusCode).json({
       ok: false,
+      state: failureState,
       error: result.error || (sitekey ? 'No Turnstile token issued for sitekey' : 'Failed to solve challenge'),
       durationMs: result.durationMs,
       modeUsed: result.modeUsed,
@@ -260,6 +292,7 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     if (err instanceof QueueFullError) {
       res.status(429).json({
         ok: false,
+        state: 'VERIFICATION_FAILED',
         error: err.message,
       });
       return;
@@ -268,8 +301,11 @@ app.post('/solve', async (req: Request, res: Response): Promise<void> => {
     const message = err instanceof Error ? err.message : String(err);
     res.status(500).json({
       ok: false,
+      state: 'VERIFICATION_FAILED',
       error: message,
     });
+  } finally {
+    if (idKey) inFlightRequestIds.delete(idKey);
   }
 });
 
@@ -280,7 +316,9 @@ if (require.main === module) {
     logWarn('Initial browser warm-up notice', { error: String(err) });
   });
 
-  const portsToListen = new Set<number>([config.port, 10000, 3000]);
+  const portsToListen = process.env.PORT
+    ? new Set<number>([config.port])
+    : new Set<number>([config.port, 10000, 3000]);
   const servers: import('http').Server[] = [];
 
   for (const p of portsToListen) {
