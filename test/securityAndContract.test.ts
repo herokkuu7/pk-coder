@@ -7,6 +7,7 @@ import {
   sanitizeLogMeta,
 } from '../src/security';
 import { parseProxy, config, logInfo, getLogs } from '../src/config';
+import { sanitizeTargetSiteUrl, isProxyOrTunnelError } from '../src/solver';
 import { ConcurrencyQueue, QueueFullError } from '../src/queue';
 import { BrowserManager } from '../src/browser';
 
@@ -91,6 +92,22 @@ async function runTests() {
   assert.equal(typeof config.port, 'number');
   const parsed = parseProxy('http://alice:secret123@192.168.1.100:8080');
   assert.equal(parsed?.server, 'http://192.168.1.100:8080');
+
+  // 4b. URL sanitization & proxy/tunnel error classification
+  assert.equal(
+    sanitizeTargetSiteUrl('https://leetcode.com/accounts/login/?__cf_chl_rt_tk=abc.123#hash'),
+    'https://leetcode.com/accounts/login/',
+  );
+  assert.equal(
+    sanitizeTargetSiteUrl('https://leetcode.com/problems/two-sum/?envType=daily&__cf_chl_tk=xyz&__cf_chl_f_tk=qrs&lang=cpp#editor'),
+    'https://leetcode.com/problems/two-sum/?envType=daily&lang=cpp',
+  );
+  assert.equal(isProxyOrTunnelError('page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://leetcode.com/'), true);
+  assert.equal(isProxyOrTunnelError('net::ERR_TUNNEL_CONNECTION_FAILED'), true);
+  assert.equal(isProxyOrTunnelError('net::ERR_PROXY_CONNECTION_FAILED'), true);
+  assert.equal(isProxyOrTunnelError('Turnstile challenge timed out after 45000ms without token'), false);
+  console.log('✓ URL sanitization and proxy error classification passed');
+
   const queue = new ConcurrencyQueue(1, 1);
   const t1 = queue.run(async () => {
     await new Promise((r) => setTimeout(r, 30));

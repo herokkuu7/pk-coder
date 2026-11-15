@@ -64,6 +64,38 @@ export const solverStats = new SolverStatsManager();
 
 export let lastDebugScreenshot: Buffer | null = null;
 
+const PROXY_OR_TUNNEL_ERROR_RE =
+  /ERR_HTTP_RESPONSE_CODE_FAILURE|ERR_PROXY_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|Challenge iframe network failure/i;
+
+/**
+ * Strips single-use Cloudflare challenge token query params (`__cf_chl_*`) and
+ * URL fragments so a fresh browser context never replays a stale token.
+ */
+export function sanitizeTargetSiteUrl(rawUrl: string): string {
+  if (typeof rawUrl !== 'string') return '';
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed);
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      if (key.toLowerCase().startsWith('__cf_chl_')) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return trimmed.split('#')[0] ?? trimmed;
+  }
+}
+
+/**
+ * Identifies proxy or CONNECT tunnel failures where direct fallback can recover.
+ */
+export function isProxyOrTunnelError(errMsg?: string): boolean {
+  return typeof errMsg === 'string' && PROXY_OR_TUNNEL_ERROR_RE.test(errMsg);
+}
+
 /**
  * Generates synthetic HTML host page with Turnstile container, callback hooks,
  * and explicit fallback render check.
@@ -224,14 +256,24 @@ interface StepSolveResult {
  * Executes a single Turnstile solve attempt under a specific browser context and proxy configuration.
  */
 async function executeSingleSolveAttempt(
-  req: SolveRequest,
-  proxyConfig: ProxyConfig | undefined,
+  rawReq: SolveRequest,
+  proxyConfigInput: ProxyConfig | undefined,
   timeoutMs: number,
   mode: SolverMode,
   attemptStartTime: number,
   signal: AbortSignal,
 ): Promise<SolveResult> {
   const browserManager = BrowserManager.getInstance();
+  const req: SolveRequest = {
+    ...rawReq,
+    siteurl: sanitizeTargetSiteUrl(rawReq.siteurl),
+  };
+  const isExplicitDirect =
+    typeof req.proxy === 'string' &&
+    ['direct', 'none', 'off'].includes(req.proxy.trim().toLowerCase());
+  const proxyConfig = isExplicitDirect ? undefined : proxyConfigInput;
+  const effectiveProxyLabel = proxyConfig?.server ? maskProxy(proxyConfig.server) : 'direct';
+
   let context: BrowserContext | null = null;
   let page: Page | null = null;
   const onAbort = () => { void context?.close().catch(() => {}); };
@@ -244,7 +286,7 @@ async function executeSingleSolveAttempt(
       sitekey: req.sitekey,
       mode,
       hasProxy: !!proxyConfig?.server,
-      proxyServer: proxyConfig?.server ? maskProxy(proxyConfig.server) : undefined,
+      proxyServer: proxyConfig?.server ? maskProxy(proxyConfig.server) : 'direct',
     });
 
     context = await browserManager.createContext(proxyConfig, req.userAgent);
@@ -252,21 +294,53 @@ async function executeSingleSolveAttempt(
 
     if (req.cookies) {
       try {
+        let fallbackDomain: string | undefined;
+        try {
+          const host = new URL(req.siteurl).hostname.replace(/^\.+/, '');
+          if (host) fallbackDomain = `.${host}`;
+        } catch {}
+
         if (Array.isArray(req.cookies)) {
-          const safeCookies = req.cookies.filter(
-            (c) => !c.name.toLowerCase().startsWith('cf_') && !c.name.toLowerCase().startsWith('__cf')
-          );
+          const safeCookies = req.cookies
+            .filter(
+              (c) =>
+                c &&
+                typeof c.name === 'string' &&
+                c.name.length > 0 &&
+                !c.name.toLowerCase().startsWith('cf_') &&
+                !c.name.toLowerCase().startsWith('__cf')
+            )
+            .map((c) => {
+              const cookieObj = c as {
+                name: string;
+                value: string;
+                url?: string;
+                domain?: string;
+                path?: string;
+                expires?: number;
+                httpOnly?: boolean;
+                secure?: boolean;
+                sameSite?: 'Strict' | 'Lax' | 'None';
+              };
+              if (!cookieObj.url && !cookieObj.domain && fallbackDomain) {
+                return { ...cookieObj, domain: fallbackDomain, path: cookieObj.path || '/' };
+              }
+              if (cookieObj.domain && !cookieObj.path) {
+                return { ...cookieObj, path: '/' };
+              }
+              return cookieObj;
+            });
           if (safeCookies.length > 0) {
             await context.addCookies(safeCookies);
           }
         } else if (typeof req.cookies === 'object') {
-          const domain = new URL(req.siteurl).hostname;
+          const domain = fallbackDomain || `.${new URL(req.siteurl).hostname}`;
           const formatted = Object.entries(req.cookies)
             .filter(([name]) => !name.toLowerCase().startsWith('cf_') && !name.toLowerCase().startsWith('__cf'))
             .map(([name, value]) => ({
               name,
               value: String(value),
-              domain: domain.startsWith('.') ? domain : `.${domain}`,
+              domain,
               path: '/',
             }));
           if (formatted.length > 0) {
@@ -347,6 +421,7 @@ async function executeSingleSolveAttempt(
         cfClearance: resolvedClearance,
         durationMs,
         modeUsed: activeMode,
+        proxyUsed: effectiveProxyLabel,
       };
     }
 
@@ -358,6 +433,7 @@ async function executeSingleSolveAttempt(
       durationMs,
       error: failError,
       modeUsed: activeMode,
+      proxyUsed: effectiveProxyLabel,
     };
   } catch (err) {
     const durationMs = Date.now() - attemptStartTime;
@@ -379,6 +455,7 @@ async function executeSingleSolveAttempt(
       durationMs,
       error: message,
       modeUsed: mode,
+      proxyUsed: effectiveProxyLabel,
     };
   } finally {
     if (page) {
@@ -400,17 +477,64 @@ async function executeSingleSolveAttempt(
  * Runs inside ConcurrencyQueue and performs sequential proxy failover across the pool
  * (from the first working IP till the end) if multiple proxies are configured.
  */
-export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): Promise<SolveResult> {
+export async function solveTurnstile(rawReq: SolveRequest, signal?: AbortSignal): Promise<SolveResult> {
   const overallStartTime = Date.now();
+  const req: SolveRequest = {
+    ...rawReq,
+    siteurl: sanitizeTargetSiteUrl(rawReq.siteurl),
+  };
   const totalTimeoutMs = req.timeout ?? config.defaultTimeoutMs;
   const mode: SolverMode = req.mode ?? 'harness';
+  const directFallbackEnabled = process.env.CPSOLVER_DISABLE_DIRECT_FALLBACK !== 'true';
+
+  const runDirectFallbackIfEligible = async (
+    reason: string,
+    failedResult: SolveResult,
+    workSignal: AbortSignal,
+  ): Promise<SolveResult> => {
+    if (!directFallbackEnabled || workSignal.aborted) {
+      return failedResult;
+    }
+    const remainingForDirect = totalTimeoutMs - (Date.now() - overallStartTime);
+    if (remainingForDirect < 12000) {
+      return failedResult;
+    }
+    logWarn(reason, {
+      remainingTimeMs: remainingForDirect,
+      priorError: failedResult.error,
+    });
+    const directRes = await executeSingleSolveAttempt(
+      { ...req, proxy: 'direct' },
+      undefined,
+      remainingForDirect,
+      mode,
+      Date.now(),
+      workSignal,
+    );
+    directRes.proxyUsed = 'direct';
+    directRes.durationMs = Date.now() - overallStartTime;
+    return directRes.ok ? directRes : failedResult;
+  };
 
   return solverQueue.run(async (workSignal) => {
     workSignal.throwIfAborted();
     // 1. Explicit per-request proxy override (or explicit 'direct')
-    if (req.proxy && typeof req.proxy === 'string' && req.proxy !== 'auto') {
-      const explicitProxy = parseProxy(req.proxy);
-      const res = await executeSingleSolveAttempt(req, explicitProxy, totalTimeoutMs, mode, overallStartTime, workSignal);
+    if (req.proxy && typeof req.proxy === 'string' && req.proxy.trim().toLowerCase() !== 'auto') {
+      const explicitDirect = ['direct', 'none', 'off'].includes(req.proxy.trim().toLowerCase());
+      const explicitProxy = explicitDirect ? undefined : parseProxy(req.proxy);
+      const firstBudget =
+        explicitProxy && directFallbackEnabled && totalTimeoutMs >= 45000
+          ? totalTimeoutMs - 15000
+          : totalTimeoutMs;
+      let res = await executeSingleSolveAttempt(req, explicitProxy, firstBudget, mode, overallStartTime, workSignal);
+      res.proxyUsed = explicitProxy ? maskProxy(req.proxy) : 'direct';
+      if (!res.ok && explicitProxy && isProxyOrTunnelError(res.error)) {
+        res = await runDirectFallbackIfEligible(
+          'Explicit proxy failed with proxy/tunnel error; falling back to direct egress',
+          res,
+          workSignal,
+        );
+      }
       res.durationMs = Date.now() - overallStartTime;
       if (res.ok) {
         solverStats.recordSuccess(res.durationMs);
@@ -422,7 +546,19 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
 
     if (req.proxy && typeof req.proxy === 'object') {
       const explicitProxy = parseProxy(req.proxy);
-      const res = await executeSingleSolveAttempt(req, explicitProxy, totalTimeoutMs, mode, overallStartTime, workSignal);
+      const firstBudget =
+        explicitProxy && directFallbackEnabled && totalTimeoutMs >= 45000
+          ? totalTimeoutMs - 15000
+          : totalTimeoutMs;
+      let res = await executeSingleSolveAttempt(req, explicitProxy, firstBudget, mode, overallStartTime, workSignal);
+      res.proxyUsed = explicitProxy ? maskProxy(req.proxy.server) : 'direct';
+      if (!res.ok && explicitProxy && isProxyOrTunnelError(res.error)) {
+        res = await runDirectFallbackIfEligible(
+          'Explicit object proxy failed with proxy/tunnel error; falling back to direct egress',
+          res,
+          workSignal,
+        );
+      }
       res.durationMs = Date.now() - overallStartTime;
       if (res.ok) {
         solverStats.recordSuccess(res.durationMs);
@@ -435,7 +571,18 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
     // 2. If no proxies in pool, run with default proxy config or direct
     if (proxyPool.size === 0) {
       const defaultProxy = parseProxy();
-      const res = await executeSingleSolveAttempt(req, defaultProxy, totalTimeoutMs, mode, overallStartTime, workSignal);
+      const firstBudget =
+        defaultProxy && directFallbackEnabled && totalTimeoutMs >= 45000
+          ? totalTimeoutMs - 15000
+          : totalTimeoutMs;
+      let res = await executeSingleSolveAttempt(req, defaultProxy, firstBudget, mode, overallStartTime, workSignal);
+      if (!res.ok && defaultProxy && isProxyOrTunnelError(res.error)) {
+        res = await runDirectFallbackIfEligible(
+          'Default proxy failed with proxy/tunnel error; falling back to direct egress',
+          res,
+          workSignal,
+        );
+      }
       res.durationMs = Date.now() - overallStartTime;
       if (res.ok) {
         solverStats.recordSuccess(res.durationMs);
@@ -469,13 +616,14 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
         break;
       }
 
-      // Budget per candidate: ensure candidate gets up to 65s if remainingTime allows,
-      // so Cloudflare clearance / Turnstile on high-latency residential proxies has sufficient time.
+      // Split remaining budget across remaining pool proxies (and optional direct fallback)
+      // so candidate #0 cannot starve subsequent candidates or direct egress.
+      const slotsRemaining = (proxyPool.size - attempt) + (directFallbackEnabled ? 1 : 0);
       const candidateBudget = Math.min(
         remainingTime,
-        attempt === proxyPool.size - 1
-          ? remainingTime
-          : Math.max(65000, remainingTime - 20000),
+        slotsRemaining > 1
+          ? Math.max(15000, Math.floor(remainingTime / slotsRemaining))
+          : remainingTime,
       );
 
       logInfo('Attempting Turnstile solve with pool proxy', {
@@ -516,17 +664,26 @@ export async function solveTurnstile(req: SolveRequest, signal?: AbortSignal): P
       });
     }
 
-    // All pool proxies failed
-    const totalDuration = Date.now() - overallStartTime;
-    solverStats.recordFailure();
-    return (
-      lastResult || {
-        ok: false,
-        durationMs: totalDuration,
-        error: `All ${proxyPool.size} proxies in pool failed to solve challenge`,
-        modeUsed: mode,
-      }
+    // All pool proxies failed — attempt direct egress fallback when sufficient budget remains
+    const poolFailure: SolveResult = lastResult || {
+      ok: false,
+      durationMs: Date.now() - overallStartTime,
+      error: `All ${proxyPool.size} proxies in pool failed to solve challenge`,
+      modeUsed: mode,
+    };
+    const finalResult = await runDirectFallbackIfEligible(
+      'All proxy pool candidates failed; attempting direct egress fallback',
+      poolFailure,
+      workSignal,
     );
+    finalResult.durationMs = Date.now() - overallStartTime;
+    if (finalResult.ok) {
+      solverStats.recordSuccess(finalResult.durationMs);
+      return finalResult;
+    }
+
+    solverStats.recordFailure();
+    return finalResult;
   }, signal);
 }
 
