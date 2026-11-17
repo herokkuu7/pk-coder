@@ -857,15 +857,22 @@ async function solveWithNavigation(
 ): Promise<StepSolveResult> {
   const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
   if (leetCodeLogin) {
+    page.on('request', request => {
+      if (request.resourceType() === 'document' && isLeetCodeLoginUrl(request.url())) {
+        logInfo('Requesting live LeetCode login document');
+      }
+    });
     page.on('response', response => {
-      try {
-        if (!response.request().isNavigationRequest() || response.frame() !== page.mainFrame()) return;
+      if (response.request().resourceType() === 'document' && isLeetCodeLoginUrl(response.url())) {
         logInfo('LeetCode login document received', {
           status: response.status(),
           cloudflareChallenge: response.headers()['cf-mitigated'] === 'challenge',
         });
-      } catch {
-        // The frame can detach during a challenge redirect.
+      }
+    });
+    page.on('requestfailed', request => {
+      if (request.resourceType() === 'document' && isLeetCodeLoginUrl(request.url())) {
+        logWarn('LeetCode login document request failed', { error: request.failure()?.errorText });
       }
     });
     page.on('console', message => {
@@ -889,6 +896,7 @@ async function solveWithNavigation(
       return route.abort();
     }
     if (leetCodeLogin) {
+      if (['image', 'font', 'media'].includes(request.resourceType())) return route.abort();
       const { protocol, hostname } = new URL(url);
       if ((protocol === 'https:' || protocol === 'http:') &&
           hostname !== 'leetcode.com' && !hostname.endsWith('.leetcode.com') &&

@@ -29,13 +29,15 @@ export function getContainerMemory() {
   };
   const miB = (value: string | undefined) => Number.isFinite(Number(value)) ? Math.round(Number(value) / 1024 ** 2) : undefined;
   const stat = read('memory.stat');
+  const events = read('memory.events');
   return {
     usedMiB: miB(read('memory.current')),
     peakMiB: miB(read('memory.peak')),
     limitMiB: miB(read('memory.max')),
     anonymousMiB: miB(/^anon (\d+)$/m.exec(stat ?? '')?.[1]),
     fileMiB: miB(/^file (\d+)$/m.exec(stat ?? '')?.[1]),
-    limitHits: Number(/^max (\d+)$/m.exec(read('memory.events') ?? '')?.[1]) || 0,
+    limitHits: Number(/^max (\d+)$/m.exec(events ?? '')?.[1]) || 0,
+    oomKills: Number(/^oom_kill (\d+)$/m.exec(events ?? '')?.[1]) || 0,
   };
 }
 

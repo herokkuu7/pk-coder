@@ -9,7 +9,8 @@ const RENDER_CHROMIUM_ARGS = [
   '--disable-gpu',
   '--in-process-gpu',
   '--no-zygote',
-  '--renderer-process-limit=2',
+  '--renderer-process-limit=1',
+  '--js-flags=--max-old-space-size=96 --max-semi-space-size=4',
 ];
 const containerChromium = process.platform === 'linux' && process.env.CPSOLVER_CONTAINER_CHROMIUM === 'true';
 
@@ -136,7 +137,7 @@ export class BrowserManager {
     }
 
     const browser = await this.ensureBrowser();
-    const viewport = containerChromium ? { width: 1280, height: 800 } : getRandomDesktopViewport();
+    const viewport = containerChromium ? { width: 1024, height: 768 } : getRandomDesktopViewport();
 
     const playwrightProxy = proxyConfig?.server
       ? {
