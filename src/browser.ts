@@ -131,7 +131,7 @@ export class BrowserManager {
    * Creates an ephemeral, stealth-instrumented BrowserContext with optional proxy routing.
    * Configures lightweight resource blocking to conserve memory on 512MB RAM instances.
    */
-  public async createContext(proxyConfig?: ProxyConfig, overrideUserAgent?: string): Promise<BrowserContext> {
+  public async createContext(proxyConfig?: ProxyConfig, overrideUserAgent?: string, proxyLoopback = false): Promise<BrowserContext> {
     if (this.recyclingPromise) {
       await this.recyclingPromise;
     }
@@ -144,6 +144,7 @@ export class BrowserManager {
           server: proxyConfig.server,
           username: proxyConfig.username,
           password: proxyConfig.password,
+          ...(proxyLoopback ? { bypass: '<-loopback>' } : {}),
         }
       : undefined;
 

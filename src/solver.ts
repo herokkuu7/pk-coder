@@ -4,6 +4,7 @@ import { ConcurrencyQueue } from './queue';
 import { config, getContainerMemory, logInfo, logWarn, parseProxy } from './config';
 import { proxyPool, maskProxy } from './proxyPool';
 import { validateTargetUrl } from './security';
+import { openLeetCodeEgress } from './leetcodeEgress';
 import { interactWithTurnstileCheckbox, isTurnstileCheckboxVisible } from './stealth';
 import type { SolveRequest, SolveResult, SolveState, SolverStats, SolverMode, ProxyConfig } from './types';
 
@@ -66,6 +67,7 @@ export let lastDebugScreenshot: Buffer | null = null;
 
 const PROXY_OR_TUNNEL_ERROR_RE =
   /ERR_HTTP_RESPONSE_CODE_FAILURE|ERR_PROXY_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|Challenge iframe network failure|Proxy authentication required \(HTTP 407\)/i;
+const LEETCODE_LOGIN_URL = 'https://leetcode.com/accounts/login/';
 
 function isLeetCodeLoginUrl(siteurl: string): boolean {
   try {
@@ -289,6 +291,7 @@ async function executeSingleSolveAttempt(
 
   let context: BrowserContext | null = null;
   let page: Page | null = null;
+  let egress: Awaited<ReturnType<typeof openLeetCodeEgress>> | undefined;
   const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
   let stage = 'create_context';
   const onAbort = () => { void context?.close().catch(() => {}); };
@@ -304,7 +307,10 @@ async function executeSingleSolveAttempt(
       proxyServer: proxyConfig?.server ? maskProxy(proxyConfig.server) : 'direct',
     });
 
-    context = await browserManager.createContext(proxyConfig, req.userAgent);
+    if (req.siteurl === LEETCODE_LOGIN_URL && !proxyConfig && !req.cookies) {
+      egress = await openLeetCodeEgress();
+    }
+    context = await browserManager.createContext(egress ?? proxyConfig, req.userAgent, Boolean(egress));
     signal.throwIfAborted();
 
     if (req.cookies) {
@@ -388,7 +394,7 @@ async function executeSingleSolveAttempt(
         stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal);
       }
     } else {
-      stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal);
+      stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal, Boolean(egress));
     }
     signal.throwIfAborted();
 
@@ -488,6 +494,7 @@ async function executeSingleSolveAttempt(
     if (context) {
       await Promise.race([context.close(), new Promise((r) => setTimeout(r, 2000))]).catch(() => {});
     }
+    egress?.close();
     try {
       if (context) await browserManager.notifySolveCompleted(solverQueue.active);
     } finally {
@@ -854,6 +861,7 @@ async function solveWithNavigation(
   timeoutMs: number,
   startTime: number,
   signal: AbortSignal,
+  egressFiltersRequests = false,
 ): Promise<StepSolveResult> {
   const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
   if (leetCodeLogin) {
@@ -881,7 +889,7 @@ async function solveWithNavigation(
     });
   }
   // Abort non-essential media assets and validate any top-level navigation redirects against SSRF rules
-  await page.route('**/*', async (route) => {
+  if (!egressFiltersRequests) await page.route('**/*', async (route) => {
     const request = route.request();
     const url = request.url();
     if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {

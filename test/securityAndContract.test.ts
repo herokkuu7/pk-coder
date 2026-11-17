@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import type { Server } from 'node:http';
+import { request, type Server } from 'node:http';
 import { app } from '../src/index';
 import {
   validateTargetUrl,
@@ -10,6 +10,7 @@ import { parseProxy, config, logInfo, getLogs } from '../src/config';
 import { sanitizeTargetSiteUrl, isProxyOrTunnelError, requiresTurnstileToken, solverQueue } from '../src/solver';
 import { ConcurrencyQueue, QueueFullError } from '../src/queue';
 import { BrowserManager } from '../src/browser';
+import { openLeetCodeEgress } from '../src/leetcodeEgress';
 
 async function runTests() {
   console.log('--- Running CPSolver Security & API Contract Tests ---');
@@ -68,6 +69,23 @@ async function runTests() {
   });
   assert.equal(validPublic.ok, true);
   console.log('✓ SSRF URL, DNS resolution, and allowlist validation passed');
+
+  const egress = await openLeetCodeEgress();
+  try {
+    const { hostname, port } = new URL(egress.server);
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const outgoing = request({ hostname, port, method: 'CONNECT', path: '127.0.0.1:443' });
+      outgoing.once('connect', (response, socket) => {
+        socket.destroy();
+        resolve(response.statusCode);
+      });
+      outgoing.once('error', reject);
+      outgoing.end();
+    });
+    assert.equal(status, 403);
+  } finally {
+    egress.close();
+  }
 
   // 3. Log redaction
   const redacted = sanitizeLogMeta({
