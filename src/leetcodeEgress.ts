@@ -2,8 +2,24 @@ import { lookup } from 'node:dns/promises';
 import { createServer } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { logWarn } from './config';
+import { logInfo, logWarn } from './config';
 import { isPrivateOrReservedIp } from './security';
+
+let recordedProbe = false;
+
+export function probeLeetCodeConnectivity() {
+  if (recordedProbe) return;
+  recordedProbe = true;
+  void fetch('https://leetcode.com/accounts/login/', { redirect: 'manual', signal: AbortSignal.timeout(8000) })
+    .then(response => {
+      logInfo('LeetCode direct HTTPS probe completed', {
+        status: response.status,
+        cloudflareChallenge: response.headers.get('cf-mitigated') === 'challenge',
+      });
+      return response.body?.cancel();
+    })
+    .catch(error => logWarn('LeetCode direct HTTPS probe failed', { error: String(error) }));
+}
 
 export async function openLeetCodeEgress(): Promise<{ server: string; close: () => void }> {
   const sockets = new Set<Duplex>();
@@ -44,6 +60,7 @@ export async function openLeetCodeEgress(): Promise<{ server: string; close: () 
       });
       upstream.once('connect', () => {
         established = true;
+        if (host === 'leetcode.com') logInfo('LeetCode browser HTTPS connection established');
         upstream.setTimeout(0);
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head.length) upstream.write(head);

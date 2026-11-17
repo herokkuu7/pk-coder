@@ -1,10 +1,11 @@
 import type { Page, BrowserContext, Frame } from 'patchright';
+import { AsyncResource } from 'node:async_hooks';
 import { BrowserManager } from './browser';
 import { ConcurrencyQueue } from './queue';
 import { config, getContainerMemory, logInfo, logWarn, parseProxy } from './config';
 import { proxyPool, maskProxy } from './proxyPool';
 import { validateTargetUrl } from './security';
-import { openLeetCodeEgress } from './leetcodeEgress';
+import { openLeetCodeEgress, probeLeetCodeConnectivity } from './leetcodeEgress';
 import { interactWithTurnstileCheckbox, isTurnstileCheckboxVisible } from './stealth';
 import type { SolveRequest, SolveResult, SolveState, SolverStats, SolverMode, ProxyConfig } from './types';
 
@@ -865,28 +866,28 @@ async function solveWithNavigation(
 ): Promise<StepSolveResult> {
   const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
   if (leetCodeLogin) {
-    page.on('request', request => {
+    page.on('request', AsyncResource.bind(request => {
       if (request.resourceType() === 'document' && isLeetCodeLoginUrl(request.url())) {
         logInfo('Requesting live LeetCode login document');
       }
-    });
-    page.on('response', response => {
+    }));
+    page.on('response', AsyncResource.bind(response => {
       if (response.request().resourceType() === 'document' && isLeetCodeLoginUrl(response.url())) {
         logInfo('LeetCode login document received', {
           status: response.status(),
           cloudflareChallenge: response.headers()['cf-mitigated'] === 'challenge',
         });
       }
-    });
-    page.on('requestfailed', request => {
+    }));
+    page.on('requestfailed', AsyncResource.bind(request => {
       if (request.resourceType() === 'document' && isLeetCodeLoginUrl(request.url())) {
         logWarn('LeetCode login document request failed', { error: request.failure()?.errorText });
       }
-    });
-    page.on('console', message => {
+    }));
+    page.on('console', AsyncResource.bind(message => {
       const code = /\[Cloudflare Turnstile\]\s*(?:Error:\s*)?(\d{6})/i.exec(message.text())?.[1];
       if (code) logWarn('LeetCode Turnstile widget reported an error', { code });
-    });
+    }));
   }
   // Abort non-essential media assets and validate any top-level navigation redirects against SSRF rules
   if (!egressFiltersRequests) await page.route('**/*', async (route) => {
@@ -915,11 +916,20 @@ async function solveWithNavigation(
     return route.fallback();
   }).catch(() => {});
 
-  const response = await page.goto(req.siteurl, {
-    waitUntil: leetCodeLogin ? 'commit' : 'domcontentloaded',
-    timeout: Math.min(timeoutMs, 25000),
-  });
-  if (response?.status() === 407) return { error: 'Proxy authentication required (HTTP 407)' };
+  if (egressFiltersRequests) {
+    probeLeetCodeConnectivity();
+    const session = await page.context().newCDPSession(page);
+    logInfo('Starting Chromium navigation for live LeetCode login');
+    const navigation = await session.send('Page.navigate', { url: req.siteurl });
+    if (navigation.errorText) return { error: navigation.errorText };
+    logInfo('Chromium navigation committed for live LeetCode login');
+  } else {
+    const response = await page.goto(req.siteurl, {
+      waitUntil: leetCodeLogin ? 'commit' : 'domcontentloaded',
+      timeout: Math.min(timeoutMs, 25000),
+    });
+    if (response?.status() === 407) return { error: 'Proxy authentication required (HTTP 407)' };
+  }
 
   const deadline = startTime + timeoutMs;
   const clickedFrames = new WeakMap<Frame, string>();
