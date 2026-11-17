@@ -42,6 +42,7 @@ ENV NODE_ENV=production \
 COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY mobile ./mobile
 
 # Port exposure (support both Render default 10000 and custom PORT=3000)
 EXPOSE 10000 3000

@@ -6,6 +6,7 @@ import type { Duplex } from 'node:stream';
 import { logInfo, logWarn } from './config';
 import { isPrivateOrReservedIp } from './security';
 import type { ProxyConfig } from './types';
+import { isLeetCodeEgressHost, type MobileDial } from './mobileTunnel';
 
 let recordedProbe = false;
 
@@ -47,7 +48,7 @@ function connectViaProxy(proxy: ProxyConfig, host: string): Promise<Socket> {
   });
 }
 
-export async function openLeetCodeEgress(proxy?: ProxyConfig): Promise<{ server: string; close: () => void }> {
+export async function openLeetCodeEgress(proxy?: ProxyConfig, mobileDial?: MobileDial): Promise<{ server: string; close: () => void }> {
   const sockets = new Set<Duplex>();
   const server = createServer((_request, response) => response.writeHead(403).end());
   server.on('connection', socket => {
@@ -57,7 +58,7 @@ export async function openLeetCodeEgress(proxy?: ProxyConfig): Promise<{ server:
   server.on('connect', async (request, client, head) => {
     client.on('error', () => client.destroy());
     const host = /^([a-z0-9.-]+):443$/i.exec(request.url ?? '')?.[1]?.toLowerCase();
-    if (!host || (host !== 'leetcode.com' && !host.endsWith('.leetcode.com') && host !== 'challenges.cloudflare.com')) {
+    if (!host || !isLeetCodeEgressHost(host)) {
       client.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
@@ -70,17 +71,16 @@ export async function openLeetCodeEgress(proxy?: ProxyConfig): Promise<{ server:
       }
       if (client.destroyed) return;
 
-      const establish = (upstream: Socket) => {
-        upstream.setTimeout(0);
-        if (host === 'leetcode.com') logInfo('LeetCode browser HTTPS connection established', { upstreamProxy: Boolean(proxy) });
+      const establish = (upstream: Duplex) => {
+        if (host === 'leetcode.com') logInfo('LeetCode browser HTTPS connection established', { upstreamProxy: Boolean(proxy), mobileTunnel: Boolean(mobileDial) });
         client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head.length) upstream.write(head);
         upstream.pipe(client);
         client.pipe(upstream);
       };
 
-      if (proxy) {
-        const upstream = await connectViaProxy(proxy, host);
+      if (mobileDial || proxy) {
+        const upstream = mobileDial ? await mobileDial(host) : await connectViaProxy(proxy!, host);
         if (client.destroyed) { upstream.destroy(); return; }
         sockets.add(upstream);
         upstream.once('close', () => sockets.delete(upstream));
@@ -106,6 +106,7 @@ export async function openLeetCodeEgress(proxy?: ProxyConfig): Promise<{ server:
       });
       upstream.once('connect', () => {
         established = true;
+        upstream.setTimeout(0);
         establish(upstream);
       });
     } catch (error) {

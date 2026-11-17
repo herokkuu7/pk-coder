@@ -1,5 +1,6 @@
 import express, { type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import cors from 'cors';
 import { config, getContainerMemory, logInfo, logWarn, logError, getLogs, requestLogContext } from './config';
 import { requiresTurnstileToken, solveTurnstile, solverQueue, solverStats, lastDebugScreenshot } from './solver';
@@ -9,6 +10,7 @@ import { BrowserManager } from './browser';
 import { QueueFullError } from './queue';
 import { buildCorsOptions, extractBearerOrHeaderToken, requireApiAuth, validateTargetUrl } from './security';
 import { leetCodeWorkerBroker } from './leetcodeWorkerBroker';
+import { attachMobileTunnel, closeMobileTunnel, getMobileDial } from './mobileTunnel';
 import type { SolveRequest, HealthResponse, SolverMode, LeetCodeLoginRequest } from './types';
 
 export const app = express();
@@ -16,6 +18,7 @@ const inFlightRequestIds = new Set<string>();
 
 app.use(cors(buildCorsOptions()));
 app.use(express.json({ limit: '1mb' }));
+app.get('/mobile/leetcode/client.mjs', (_req, res) => res.sendFile(resolve('mobile/leetcode-tunnel.mjs')));
 app.use('/solve', (req, res, next) => {
   const supplied = req.header('x-request-id');
   const requestId = supplied && /^[a-zA-Z0-9_-]{1,128}$/.test(supplied) ? supplied : randomUUID();
@@ -140,7 +143,7 @@ app.get('/stats', requireApiAuth, (_req: Request, res: Response) => {
     solverQueue.waiting,
     browserManager.restarts,
   );
-  res.status(200).json({ ...stats, containerMemory: getContainerMemory(), leetCodeWorkerConnected: leetCodeWorkerBroker.available });
+  res.status(200).json({ ...stats, containerMemory: getContainerMemory(), leetCodeWorkerConnected: leetCodeWorkerBroker.available, androidTunnelConnected: Boolean(getMobileDial()) });
 });
 
 app.post('/workers/leetcode/register', requireApiAuth, (_req, res) => {
@@ -292,12 +295,25 @@ app.post('/solve', requireApiAuth, async (req: Request, res: Response): Promise<
       cookies: cookies,
     };
 
-    const useWorker = leetCodeWorkerBroker.available &&
+    const eligibleLeetCode =
       urlCheck.url?.origin === 'https://leetcode.com' &&
       /^\/accounts\/login\/?$/.test(urlCheck.url.pathname) &&
-      !solveReq.cookies && !solveReq.userAgent &&
-      (!solveReq.proxy || (typeof solveReq.proxy === 'string' && solveReq.proxy.trim().toLowerCase() === 'auto'));
-    const result = useWorker
+      !solveReq.cookies && !solveReq.userAgent;
+    const route = typeof solveReq.proxy === 'string' ? solveReq.proxy.trim().toLowerCase() : solveReq.proxy;
+    const requestedMobile = route === 'mobile';
+    const useWorker = eligibleLeetCode && leetCodeWorkerBroker.available && (!route || route === 'auto');
+    const mobileDial = eligibleLeetCode && (requestedMobile || (!useWorker && (!route || route === 'auto'))) ? getMobileDial() : undefined;
+    if (requestedMobile && !mobileDial) {
+      res.status(eligibleLeetCode ? 503 : 400).json({
+        ok: false,
+        state: 'VERIFICATION_FAILED',
+        error: eligibleLeetCode ? 'Android tunnel is disconnected' : 'Mobile routing requires an anonymous LeetCode login solve',
+      });
+      return;
+    }
+    const result = mobileDial
+      ? await solveTurnstile({ ...solveReq, siteurl: 'https://leetcode.com/accounts/login/', proxy: 'direct' }, abortController.signal, mobileDial)
+      : useWorker
       ? await leetCodeWorkerBroker.solve(solveReq.timeout ?? config.defaultTimeoutMs, abortController.signal)
       : await solveTurnstile(solveReq, abortController.signal);
     logInfo('Solve operation finished', { ok: result.ok, state: result.state, mode: result.modeUsed, durationMs: result.durationMs });
@@ -446,6 +462,7 @@ if (require.main === module) {
           headless: config.headless,
         });
       });
+      attachMobileTunnel(s);
       s.on('error', (err: any) => {
         if (err.code !== 'EADDRINUSE') {
           logError(`Error on port ${p}`, { error: String(err) });
@@ -457,6 +474,7 @@ if (require.main === module) {
 
   const shutdown = async (signal: string) => {
     logInfo(`Received ${signal}. Shutting down gracefully...`);
+    closeMobileTunnel();
     for (const s of servers) {
       s.close();
     }

@@ -199,6 +199,16 @@ async function runTests() {
       Authorization: 'Bearer unit_test_secret_token_987654',
       'Content-Type': 'application/json',
     };
+    const disconnectedMobile = await fetch(`${baseUrl}/solve`, {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ siteurl: 'https://leetcode.com/accounts/login/', proxy: 'mobile' }),
+    });
+    assert.equal(disconnectedMobile.status, 503);
+    const outOfScopeMobile = await fetch(`${baseUrl}/solve`, {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ siteurl: 'https://example.com/', proxy: 'mobile' }),
+    });
+    assert.equal(outOfScopeMobile.status, 400);
     let releaseSlots!: () => void;
     const heldSlot = new Promise<void>(resolve => { releaseSlots = resolve; });
     const occupiedSlots = Array.from({ length: solverQueue.capacity.maxConcurrent }, () =>

@@ -6,6 +6,7 @@ import { config, getContainerMemory, logInfo, logWarn, parseProxy } from './conf
 import { proxyPool, maskProxy } from './proxyPool';
 import { validateTargetUrl } from './security';
 import { openLeetCodeEgress, probeLeetCodeConnectivity } from './leetcodeEgress';
+import type { MobileDial } from './mobileTunnel';
 import { interactWithTurnstileCheckbox, isTurnstileCheckboxVisible } from './stealth';
 import type { SolveRequest, SolveResult, SolveState, SolverStats, SolverMode, ProxyConfig } from './types';
 
@@ -278,6 +279,7 @@ async function executeSingleSolveAttempt(
   mode: SolverMode,
   attemptStartTime: number,
   signal: AbortSignal,
+  mobileDial?: MobileDial,
 ): Promise<SolveResult> {
   const browserManager = BrowserManager.getInstance();
   const req: SolveRequest = {
@@ -288,7 +290,7 @@ async function executeSingleSolveAttempt(
     typeof req.proxy === 'string' &&
     ['direct', 'none', 'off'].includes(req.proxy.trim().toLowerCase());
   const proxyConfig = isExplicitDirect ? undefined : proxyConfigInput;
-  const effectiveProxyLabel = proxyConfig?.server ? maskProxy(proxyConfig.server) : 'direct';
+  const effectiveProxyLabel = mobileDial ? 'android-tunnel' : (proxyConfig?.server ? maskProxy(proxyConfig.server) : 'direct');
 
   let context: BrowserContext | null = null;
   let page: Page | null = null;
@@ -309,7 +311,7 @@ async function executeSingleSolveAttempt(
     });
 
     if (req.siteurl === LEETCODE_LOGIN_URL && !req.cookies && (!proxyConfig || /^https?:\/\//.test(proxyConfig.server))) {
-      egress = await openLeetCodeEgress(proxyConfig);
+      egress = await openLeetCodeEgress(proxyConfig, mobileDial);
     }
     context = await browserManager.createContext(egress ?? proxyConfig, req.userAgent, Boolean(egress));
     signal.throwIfAborted();
@@ -395,7 +397,7 @@ async function executeSingleSolveAttempt(
         stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal);
       }
     } else {
-      stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal, Boolean(egress));
+      stepResult = await solveWithNavigation(page, req, timeoutMs, attemptStartTime, signal, Boolean(egress), Boolean(mobileDial));
     }
     signal.throwIfAborted();
 
@@ -510,7 +512,7 @@ async function executeSingleSolveAttempt(
  * Runs inside ConcurrencyQueue and performs sequential proxy failover across the pool
  * (from the first working IP till the end) if multiple proxies are configured.
  */
-export async function solveTurnstile(rawReq: SolveRequest, signal?: AbortSignal): Promise<SolveResult> {
+export async function solveTurnstile(rawReq: SolveRequest, signal?: AbortSignal, mobileDial?: MobileDial): Promise<SolveResult> {
   const overallStartTime = Date.now();
   const req: SolveRequest = {
     ...rawReq,
@@ -565,8 +567,8 @@ export async function solveTurnstile(rawReq: SolveRequest, signal?: AbortSignal)
         explicitProxy && directFallbackEnabled && totalTimeoutMs >= 45000
           ? totalTimeoutMs - 15000
           : totalTimeoutMs;
-      let res = await executeSingleSolveAttempt(req, explicitProxy, firstBudget, mode, overallStartTime, workSignal);
-      res.proxyUsed = explicitProxy ? maskProxy(req.proxy) : 'direct';
+      let res = await executeSingleSolveAttempt(req, explicitProxy, firstBudget, mode, overallStartTime, workSignal, mobileDial);
+      res.proxyUsed = mobileDial ? 'android-tunnel' : (explicitProxy ? maskProxy(req.proxy) : 'direct');
       if (!res.ok && explicitProxy && isProxyOrTunnelError(res.error)) {
         res = await runDirectFallbackIfEligible(
           'Explicit proxy failed with proxy/tunnel error; falling back to direct egress',
@@ -863,6 +865,7 @@ async function solveWithNavigation(
   startTime: number,
   signal: AbortSignal,
   egressFiltersRequests = false,
+  usesMobile = false,
 ): Promise<StepSolveResult> {
   const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
   if (leetCodeLogin) {
@@ -917,7 +920,7 @@ async function solveWithNavigation(
   }).catch(() => {});
 
   if (egressFiltersRequests) {
-    probeLeetCodeConnectivity();
+    if (!usesMobile) probeLeetCodeConnectivity();
     const session = await page.context().newCDPSession(page);
     logInfo('Starting Chromium navigation for live LeetCode login');
     const navigation = await session.send('Page.navigate', { url: req.siteurl });
