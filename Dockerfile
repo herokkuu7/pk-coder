@@ -26,13 +26,14 @@ FROM mcr.microsoft.com/playwright:v1.63.0-noble AS runner
 WORKDIR /app
 
 # Install lightweight Xvfb virtual display server
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb xauth \
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb \
  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     PORT=10000 \
     HOST=0.0.0.0 \
     HEADLESS=false \
+    CPSOLVER_MANAGE_XVFB=true \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATCHRIGHT_BROWSERS_PATH=/ms-playwright \
     # Restrict Node V8 heap to ~192MB with --expose-gc so Chromium has ~300MB headroom within Render's 512MB limit
@@ -45,5 +46,4 @@ COPY --from=builder /app/dist ./dist
 # Port exposure (support both Render default 10000 and custom PORT=3000)
 EXPOSE 10000 3000
 
-# Wait for the display to be ready before starting the solver.
-CMD ["xvfb-run", "-a", "-s", "-screen 0 1280x800x24 -nolisten tcp", "node", "dist/src/index.js"]
+CMD ["node", "dist/src/index.js"]

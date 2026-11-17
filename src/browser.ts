@@ -2,6 +2,7 @@ import { chromium, type Browser, type BrowserContext } from 'patchright';
 import { config, logInfo, logWarn, logError } from './config';
 import { STEALTH_CHROMIUM_ARGS, getRandomDesktopViewport, applyStealthScripts } from './stealth';
 import type { ProxyConfig } from './types';
+import { startVirtualDisplay, type VirtualDisplay } from './virtualDisplay';
 
 export class BrowserManager {
   private static instance: BrowserManager | null = null;
@@ -11,6 +12,7 @@ export class BrowserManager {
   private solvesCount = 0;
   private browserRestarts = 0;
   private cachedUserAgent: string | null = null;
+  private virtualDisplay: VirtualDisplay | null = null;
 
   private constructor() {}
 
@@ -58,6 +60,7 @@ export class BrowserManager {
 
     this.launchingPromise = (async () => {
       try {
+        const display = await this.ensureVirtualDisplay();
         logInfo('Launching Chromium instance with memory-conservative flags...', {
           headless: config.headless,
           maxOldSpace: 160,
@@ -67,6 +70,7 @@ export class BrowserManager {
           headless: config.headless,
           args: STEALTH_CHROMIUM_ARGS,
           timeout: 30000,
+          ...(display ? { env: { ...process.env, DISPLAY: display } } : {}),
         });
 
         instance.on('disconnected', () => {
@@ -93,6 +97,23 @@ export class BrowserManager {
     })();
 
     return this.launchingPromise;
+  }
+
+  private async ensureVirtualDisplay(): Promise<string | undefined> {
+    if (config.headless || process.platform !== 'linux' || process.env.CPSOLVER_MANAGE_XVFB !== 'true') return;
+    if (this.virtualDisplay) return this.virtualDisplay.name;
+
+    logInfo('Starting Xvfb for headed Chromium');
+    const display = await startVirtualDisplay();
+    this.virtualDisplay = display;
+    display.process.once('exit', (code, signal) => {
+      if (this.virtualDisplay === display) {
+        this.virtualDisplay = null;
+        logWarn('Xvfb exited', { code, signal });
+      }
+    });
+    logInfo('Xvfb display ready', { display: display.name });
+    return display.name;
   }
 
   /**
@@ -205,10 +226,14 @@ export class BrowserManager {
     if (this.recyclingPromise) {
       await this.recyclingPromise.catch(() => {});
     }
+    await this.launchingPromise?.catch(() => {});
     if (this.browser) {
       const b = this.browser;
       this.browser = null;
       await b.close().catch(() => {});
     }
+    const display = this.virtualDisplay;
+    this.virtualDisplay = null;
+    display?.process.kill();
   }
 }
