@@ -4,6 +4,15 @@ import { STEALTH_CHROMIUM_ARGS, getRandomDesktopViewport, applyStealthScripts } 
 import type { ProxyConfig } from './types';
 import { startVirtualDisplay, type VirtualDisplay } from './virtualDisplay';
 
+const RENDER_CHROMIUM_ARGS = [
+  ...STEALTH_CHROMIUM_ARGS,
+  '--disable-gpu',
+  '--in-process-gpu',
+  '--no-zygote',
+  '--renderer-process-limit=2',
+];
+const containerChromium = process.platform === 'linux' && process.env.CPSOLVER_CONTAINER_CHROMIUM === 'true';
+
 export class BrowserManager {
   private static instance: BrowserManager | null = null;
   private browser: Browser | null = null;
@@ -68,8 +77,9 @@ export class BrowserManager {
 
         const instance = await chromium.launch({
           headless: config.headless,
-          args: display ? [...STEALTH_CHROMIUM_ARGS, '--renderer-process-limit=2'] : STEALTH_CHROMIUM_ARGS,
+          args: containerChromium ? RENDER_CHROMIUM_ARGS : STEALTH_CHROMIUM_ARGS,
           timeout: 30000,
+          ...(containerChromium && config.headless ? { channel: 'chromium' } : {}),
           ...(display ? { env: { ...process.env, DISPLAY: display } } : {}),
         });
 
@@ -126,7 +136,7 @@ export class BrowserManager {
     }
 
     const browser = await this.ensureBrowser();
-    const viewport = getRandomDesktopViewport();
+    const viewport = containerChromium ? { width: 1280, height: 800 } : getRandomDesktopViewport();
 
     const playwrightProxy = proxyConfig?.server
       ? {

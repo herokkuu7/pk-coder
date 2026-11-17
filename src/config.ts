@@ -23,18 +23,19 @@ export const config = {
 
 export function getContainerMemory() {
   if (process.platform !== 'linux') return;
-  const readMiB = (file: string) => {
-    try {
-      const bytes = Number(readFileSync(`/sys/fs/cgroup/${file}`, 'utf8').trim());
-      return Number.isFinite(bytes) ? Math.round(bytes / 1024 ** 2) : undefined;
-    } catch {
-      return undefined;
-    }
+  const read = (file: string) => {
+    try { return readFileSync(`/sys/fs/cgroup/${file}`, 'utf8').trim(); }
+    catch { return undefined; }
   };
+  const miB = (value: string | undefined) => Number.isFinite(Number(value)) ? Math.round(Number(value) / 1024 ** 2) : undefined;
+  const stat = read('memory.stat');
   return {
-    usedMiB: readMiB('memory.current'),
-    peakMiB: readMiB('memory.peak'),
-    limitMiB: readMiB('memory.max'),
+    usedMiB: miB(read('memory.current')),
+    peakMiB: miB(read('memory.peak')),
+    limitMiB: miB(read('memory.max')),
+    anonymousMiB: miB(/^anon (\d+)$/m.exec(stat ?? '')?.[1]),
+    fileMiB: miB(/^file (\d+)$/m.exec(stat ?? '')?.[1]),
+    limitHits: Number(/^max (\d+)$/m.exec(read('memory.events') ?? '')?.[1]) || 0,
   };
 }
 
