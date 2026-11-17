@@ -1,4 +1,4 @@
-import type { Page, BrowserContext } from 'patchright';
+import type { Page, BrowserContext, Frame } from 'patchright';
 import { BrowserManager } from './browser';
 import { ConcurrencyQueue } from './queue';
 import { config, logInfo, logWarn, parseProxy } from './config';
@@ -847,6 +847,23 @@ async function solveWithNavigation(
   signal: AbortSignal,
 ): Promise<StepSolveResult> {
   const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
+  if (leetCodeLogin) {
+    page.on('response', response => {
+      try {
+        if (!response.request().isNavigationRequest() || response.frame() !== page.mainFrame()) return;
+        logInfo('LeetCode login document received', {
+          status: response.status(),
+          cloudflareChallenge: response.headers()['cf-mitigated'] === 'challenge',
+        });
+      } catch {
+        // The frame can detach during a challenge redirect.
+      }
+    });
+    page.on('console', message => {
+      const code = /\[Cloudflare Turnstile\]\s*(?:Error:\s*)?(\d{6})/i.exec(message.text())?.[1];
+      if (code) logWarn('LeetCode Turnstile widget reported an error', { code });
+    });
+  }
   // Abort non-essential media assets and validate any top-level navigation redirects against SSRF rules
   await page.route('**/*', async (route) => {
     const request = route.request();
@@ -880,7 +897,7 @@ async function solveWithNavigation(
   if (response?.status() === 407) return { error: 'Proxy authentication required (HTTP 407)' };
 
   const deadline = startTime + timeoutMs;
-  let lastClickTime = 0;
+  const clickedFrames = new WeakMap<Frame, string>();
   const requiresToken = requiresTurnstileToken(req);
   const readToken = async (): Promise<string | null> => {
     if (!leetCodeLogin) return extractTokenFromPage(page);
@@ -900,41 +917,13 @@ async function solveWithNavigation(
     const token = await readToken();
     if (token) return { token };
 
-    // 2. Check if cf_clearance was issued (real cookie value)
-    const cookies = await page.context().cookies().catch(() => []);
-    const cfCookie = cookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
-    if (cfCookie && !requiresToken) {
-      return { cfClearance: cfCookie.value };
+    if (!requiresToken) {
+      const cookies = await page.context().cookies().catch(() => []);
+      const cfCookie = cookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
+      if (cfCookie) return { cfClearance: cfCookie.value };
     }
 
-    // 3. Check if page transitioned away from Cloudflare challenge page
-    const title = await page.title().catch(() => '');
-    const url = page.url();
-    const elapsed = Date.now() - startTime;
-    if (
-      !requiresToken &&
-      elapsed > 4000 &&
-      !title.toLowerCase().includes('just a moment') &&
-      !url.includes('__cf_chl_rt_tk')
-    ) {
-      // Page is no longer on Cloudflare challenge — check for token or real clearance
-      const tokenFinal = await readToken();
-      if (tokenFinal) return { token: tokenFinal };
-      // Re-check cookies since page navigation may have set them
-      const freshCookies = await page.context().cookies().catch(() => []);
-      const freshCf = freshCookies.find((c) => c.name === 'cf_clearance' && c.value.length > 5);
-      if (freshCf) return { cfClearance: freshCf.value };
-    }
-
-    // 4. Intelligent pacing: wait for challenge settling, and click once interactive checkbox appears
-    const isInteractiveReady = await isTurnstileCheckboxVisible(page);
-
-    if (!lastClickTime && (isInteractiveReady || elapsed >= 35000)) {
-      const clicked = await interactWithTurnstileCheckbox(page);
-      if (clicked) {
-        lastClickTime = Date.now();
-      }
-    }
+    await interactWithTurnstileCheckbox(page, clickedFrames);
 
     await new Promise((r) => setTimeout(r, 400));
   }
