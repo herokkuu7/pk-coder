@@ -7,7 +7,7 @@ import {
   sanitizeLogMeta,
 } from '../src/security';
 import { parseProxy, config, logInfo, getLogs } from '../src/config';
-import { sanitizeTargetSiteUrl, isProxyOrTunnelError } from '../src/solver';
+import { sanitizeTargetSiteUrl, isProxyOrTunnelError, solverQueue } from '../src/solver';
 import { ConcurrencyQueue, QueueFullError } from '../src/queue';
 import { BrowserManager } from '../src/browser';
 
@@ -137,6 +137,10 @@ async function runTests() {
     const healthBody = (await healthRes.json()) as Record<string, unknown>;
     assert.equal(healthBody.status, 'ok');
 
+    const solveGet = await fetch(`${baseUrl}/solve`);
+    assert.equal(solveGet.status, 405);
+    assert.equal(solveGet.headers.get('allow'), 'POST');
+
     // Sensitive routes must reject unauthenticated requests
     const protectedRoutes: Array<[string, string]> = [
       ['POST', '/solve'],
@@ -169,6 +173,28 @@ async function runTests() {
       Authorization: 'Bearer unit_test_secret_token_987654',
       'Content-Type': 'application/json',
     };
+    let releaseSlots!: () => void;
+    const heldSlot = new Promise<void>(resolve => { releaseSlots = resolve; });
+    const occupiedSlots = Array.from({ length: solverQueue.capacity.maxConcurrent }, () =>
+      solverQueue.run(() => heldSlot)
+    );
+    process.env.CPSOLVER_ALLOW_LOOPBACK_TEST = 'true';
+    try {
+      const timeoutRes = await fetch(`${baseUrl}/solve`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ siteurl: 'http://127.0.0.1/fixture', timeout: 1000 }),
+        signal: AbortSignal.timeout(5000),
+      });
+      assert.equal(timeoutRes.status, 408);
+      assert.equal((await timeoutRes.json() as { state: string }).state, 'TIMED_OUT');
+      assert.equal(solverQueue.waiting, 0);
+      assert.equal(solverQueue.active, occupiedSlots.length);
+    } finally {
+      delete process.env.CPSOLVER_ALLOW_LOOPBACK_TEST;
+      releaseSlots();
+      await Promise.all(occupiedSlots);
+    }
     const statsRes = await fetch(`${baseUrl}/stats`, { headers: authHeaders });
     assert.equal(statsRes.status, 200);
     const logsRes = await fetch(`${baseUrl}/logs?limit=5`, {

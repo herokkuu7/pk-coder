@@ -71,7 +71,7 @@ export class BrowserManager {
 
         instance.on('disconnected', () => {
           logWarn('Chromium disconnected or terminated.');
-          this.browser = null;
+          if (this.browser === instance) this.browser = null;
         });
 
         this.browser = instance;
@@ -144,6 +144,7 @@ export class BrowserManager {
    * and no active solves are currently using the browser.
    */
   public async notifySolveCompleted(activeCount = 0): Promise<void> {
+    if (!this.isAlive) return;
     this.solvesCount++;
     const mem = process.memoryUsage();
     const rssMb = Math.round(mem.rss / 1024 / 1024);
@@ -158,7 +159,9 @@ export class BrowserManager {
         maxRssMb: config.maxRssMb,
       });
 
-      await this.recycle();
+      // Any new context waits for recycling through ensureBrowser. A completed
+      // solve can return its result while Chromium is being replaced.
+      void this.recycle();
     }
   }
 

@@ -13,6 +13,7 @@ interface QueuedItem<T> {
   reject: (reason?: unknown) => void;
   controller: AbortController;
   detachAbort: () => void;
+  executionTimeoutMs: number;
 }
 
 export class ConcurrencyQueue {
@@ -49,7 +50,11 @@ export class ConcurrencyQueue {
     };
   }
 
-  public async run<T>(task: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  public async run<T>(
+    task: (signal: AbortSignal) => Promise<T>,
+    signal?: AbortSignal,
+    executionTimeoutMs = 120_000,
+  ): Promise<T> {
     if (signal?.aborted) {
       throw new Error('Task was aborted before entering queue');
     }
@@ -63,7 +68,14 @@ export class ConcurrencyQueue {
 
     return new Promise<T>((resolve, reject) => {
       const controller = new AbortController();
-      const item: QueuedItem<T> = { task: AsyncResource.bind(task), resolve, reject, controller, detachAbort: () => {} };
+      const item: QueuedItem<T> = {
+        task: AsyncResource.bind(task),
+        resolve,
+        reject,
+        controller,
+        detachAbort: () => {},
+        executionTimeoutMs,
+      };
 
       if (signal) {
         const onAbort = () => {
@@ -101,10 +113,10 @@ export class ConcurrencyQueue {
       let timeoutTimer: NodeJS.Timeout | null = null;
       try {
         timeoutTimer = setTimeout(() => {
-          const error = new Error('Task execution timed out after 120s in concurrency queue');
+          const error = new Error(`Task execution timed out after ${item.executionTimeoutMs / 1000}s in concurrency queue`);
           item.controller.abort(error);
           item.reject(error);
-        }, 120_000);
+        }, item.executionTimeoutMs);
         // Reject the caller on cancellation, but hold capacity until work has
         // stopped and completed its cleanup. A Promise.race freed the slot early.
         const result = await item.task(item.controller.signal);

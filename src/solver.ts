@@ -467,8 +467,12 @@ async function executeSingleSolveAttempt(
     if (context) {
       await Promise.race([context.close(), new Promise((r) => setTimeout(r, 2000))]).catch(() => {});
     }
-    try { await browserManager.notifySolveCompleted(solverQueue.active); }
-    finally { signal.removeEventListener('abort', onAbort); }
+    try {
+      if (context) await browserManager.notifySolveCompleted(solverQueue.active);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+    signal.throwIfAborted();
   }
 }
 
@@ -515,6 +519,12 @@ export async function solveTurnstile(rawReq: SolveRequest, signal?: AbortSignal)
     directRes.durationMs = Date.now() - overallStartTime;
     return directRes.ok ? directRes : failedResult;
   };
+
+  const controller = new AbortController();
+  const cancel = () => controller.abort(signal?.reason);
+  if (signal?.aborted) cancel();
+  else signal?.addEventListener('abort', cancel, { once: true });
+  const timer = setTimeout(() => controller.abort(), totalTimeoutMs);
 
   return solverQueue.run(async (workSignal) => {
     workSignal.throwIfAborted();
@@ -684,7 +694,20 @@ export async function solveTurnstile(rawReq: SolveRequest, signal?: AbortSignal)
 
     solverStats.recordFailure();
     return finalResult;
-  }, signal);
+  }, controller.signal, totalTimeoutMs).catch((error) => {
+    if (!controller.signal.aborted || signal?.aborted) throw error;
+    solverStats.recordFailure();
+    return {
+      ok: false,
+      state: 'TIMED_OUT' as const,
+      error: `Solve timed out after ${totalTimeoutMs}ms`,
+      durationMs: Date.now() - overallStartTime,
+      modeUsed: mode,
+    };
+  }).finally(() => {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', cancel);
+  });
 }
 
 

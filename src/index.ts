@@ -178,6 +178,7 @@ app.post('/solve', requireApiAuth, async (req: Request, res: Response): Promise<
   }
 
   const urlCheck = await validateTargetUrl(siteurl);
+  if (res.destroyed) return;
   if (!urlCheck.ok) {
     res.status(urlCheck.statusCode ?? 400).json({
       ok: false,
@@ -307,6 +308,14 @@ app.post('/solve', requireApiAuth, async (req: Request, res: Response): Promise<
   } finally {
     if (idKey) inFlightRequestIds.delete(idKey);
   }
+});
+
+app.all('/solve', (_req: Request, res: Response) => {
+  res.setHeader('Allow', 'POST');
+  res.status(405).json({
+    ok: false,
+    error: 'Use POST /solve with a Bearer API token and a JSON body containing siteurl.',
+  });
 });
 
 // Start listening if executed directly
