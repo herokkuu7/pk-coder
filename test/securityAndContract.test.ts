@@ -169,6 +169,7 @@ async function runTests() {
     const protectedRoutes: Array<[string, string]> = [
       ['POST', '/solve'],
       ['POST', '/leetcode-login'],
+      ['POST', '/workers/leetcode/register'],
       ['GET', '/logs'],
       ['GET', '/screenshot'],
       ['GET', '/proxies'],
@@ -222,6 +223,35 @@ async function runTests() {
     }
     const statsRes = await fetch(`${baseUrl}/stats`, { headers: authHeaders });
     assert.equal(statsRes.status, 200);
+
+    const workerUrl = `${baseUrl}/workers/leetcode`;
+    const registration = await fetch(`${workerUrl}/register`, { method: 'POST', headers: authHeaders });
+    assert.equal(registration.status, 201);
+    const { token: workerToken } = await registration.json() as { token: string };
+    const workerHeaders = { ...authHeaders, Authorization: `Bearer ${workerToken}` };
+    const wrongWorkerKey = await fetch(`${workerUrl}/next`, { headers: authHeaders });
+    assert.equal(wrongWorkerKey.status, 401);
+    const queuedSolve = fetch(`${baseUrl}/solve`, {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ siteurl: 'https://leetcode.com/accounts/login/', timeout: 5000 }),
+      signal: AbortSignal.timeout(8000),
+    });
+    let claimed: { id: string } | undefined;
+    for (let i = 0; i < 40 && !claimed; i++) {
+      const response = await fetch(`${workerUrl}/next`, { headers: workerHeaders });
+      if (response.status === 200) claimed = await response.json() as { id: string };
+      else assert.equal(response.status, 204);
+      if (!claimed) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(claimed);
+    const fixtureToken = 'local-worker-fixture-'.repeat(8);
+    const uploaded = await fetch(`${workerUrl}/${claimed.id}/result`, {
+      method: 'POST', headers: workerHeaders, body: JSON.stringify({ token: fixtureToken }),
+    });
+    assert.equal(uploaded.status, 204);
+    const relayed = await queuedSolve;
+    assert.equal(relayed.status, 200);
+    assert.deepEqual((await relayed.json() as Record<string, unknown>).token, fixtureToken);
     const logsRes = await fetch(`${baseUrl}/logs?limit=5`, {
       headers: { 'x-api-key': 'unit_test_secret_token_987654' },
     });

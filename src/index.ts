@@ -7,7 +7,8 @@ import { solveLeetCodeLogin } from './leetcodeLogin';
 import { proxyPool } from './proxyPool';
 import { BrowserManager } from './browser';
 import { QueueFullError } from './queue';
-import { buildCorsOptions, requireApiAuth, validateTargetUrl } from './security';
+import { buildCorsOptions, extractBearerOrHeaderToken, requireApiAuth, validateTargetUrl } from './security';
+import { leetCodeWorkerBroker } from './leetcodeWorkerBroker';
 import type { SolveRequest, HealthResponse, SolverMode, LeetCodeLoginRequest } from './types';
 
 export const app = express();
@@ -139,7 +140,37 @@ app.get('/stats', requireApiAuth, (_req: Request, res: Response) => {
     solverQueue.waiting,
     browserManager.restarts,
   );
-  res.status(200).json({ ...stats, containerMemory: getContainerMemory() });
+  res.status(200).json({ ...stats, containerMemory: getContainerMemory(), leetCodeWorkerConnected: leetCodeWorkerBroker.available });
+});
+
+app.post('/workers/leetcode/register', requireApiAuth, (_req, res) => {
+  const token = leetCodeWorkerBroker.register();
+  if (!token) {
+    res.status(409).json({ error: 'A private LeetCode worker is already connected' });
+    return;
+  }
+  res.set('Cache-Control', 'no-store').status(201).json({ token });
+});
+
+app.get('/workers/leetcode/next', (req, res) => {
+  const token = extractBearerOrHeaderToken(req);
+  if (!leetCodeWorkerBroker.authenticate(token)) {
+    res.sendStatus(401);
+    return;
+  }
+  const job = req.query.busy === '1' ? undefined : leetCodeWorkerBroker.claim(token);
+  res.set('Cache-Control', 'no-store');
+  if (job) res.json(job);
+  else res.sendStatus(204);
+});
+
+app.post('/workers/leetcode/:id/result', (req, res) => {
+  const token = extractBearerOrHeaderToken(req);
+  if (!leetCodeWorkerBroker.authenticate(token)) {
+    res.sendStatus(401);
+    return;
+  }
+  res.sendStatus(leetCodeWorkerBroker.complete(token, req.params.id ?? '', req.body?.token) ? 204 : 404);
 });
 
 /**
@@ -261,7 +292,14 @@ app.post('/solve', requireApiAuth, async (req: Request, res: Response): Promise<
       cookies: cookies,
     };
 
-    const result = await solveTurnstile(solveReq, abortController.signal);
+    const useWorker = leetCodeWorkerBroker.available &&
+      urlCheck.url?.origin === 'https://leetcode.com' &&
+      /^\/accounts\/login\/?$/.test(urlCheck.url.pathname) &&
+      !solveReq.cookies && !solveReq.userAgent &&
+      (!solveReq.proxy || (typeof solveReq.proxy === 'string' && solveReq.proxy.trim().toLowerCase() === 'auto'));
+    const result = useWorker
+      ? await leetCodeWorkerBroker.solve(solveReq.timeout ?? config.defaultTimeoutMs, abortController.signal)
+      : await solveTurnstile(solveReq, abortController.signal);
     logInfo('Solve operation finished', { ok: result.ok, state: result.state, mode: result.modeUsed, durationMs: result.durationMs });
     if (res.destroyed) return;
 

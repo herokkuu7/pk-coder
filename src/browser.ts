@@ -80,7 +80,9 @@ export class BrowserManager {
           headless: config.headless,
           args: containerChromium ? RENDER_CHROMIUM_ARGS : STEALTH_CHROMIUM_ARGS,
           timeout: 30000,
-          ...(containerChromium && config.headless ? { channel: 'chromium' } : {}),
+          ...(config.headless && (containerChromium || process.env.CPSOLVER_FULL_CHROMIUM === 'true')
+            ? { channel: 'chromium' }
+            : {}),
           ...(display ? { env: { ...process.env, DISPLAY: display } } : {}),
         });
 
