@@ -846,6 +846,7 @@ async function solveWithNavigation(
   startTime: number,
   signal: AbortSignal,
 ): Promise<StepSolveResult> {
+  const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
   // Abort non-essential media assets and validate any top-level navigation redirects against SSRF rules
   await page.route('**/*', async (route) => {
     const request = route.request();
@@ -861,6 +862,14 @@ async function solveWithNavigation(
     if (/\.(png|jpg|jpeg|gif|webp|ico|svg|woff|woff2|ttf|mp4|webm|avi|mp3)(\?.*)?$/i.test(url)) {
       return route.abort();
     }
+    if (leetCodeLogin) {
+      const { protocol, hostname } = new URL(url);
+      if ((protocol === 'https:' || protocol === 'http:') &&
+          hostname !== 'leetcode.com' && !hostname.endsWith('.leetcode.com') &&
+          hostname !== 'challenges.cloudflare.com') {
+        return route.abort();
+      }
+    }
     return route.fallback();
   }).catch(() => {});
 
@@ -873,7 +882,6 @@ async function solveWithNavigation(
   const deadline = startTime + timeoutMs;
   let lastClickTime = 0;
   const requiresToken = requiresTurnstileToken(req);
-  const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
   const readToken = async (): Promise<string | null> => {
     if (!leetCodeLogin) return extractTokenFromPage(page);
     // The interstitial and the rendered LeetCode sign-in form have separate

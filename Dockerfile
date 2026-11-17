@@ -1,7 +1,7 @@
 # ==============================================================================
 # Dockerfile for CPSolver: Cloudflare Turnstile Solver Microservice
 # Optimized for Render Free Web Services (512MB RAM cgroup limit)
-# Uses Xvfb virtual display to enable headed Chromium for 100% Turnstile bypass
+# Uses Xvfb to provide the display required by headed Chromium
 # ==============================================================================
 
 # Stage 1: Build stage
@@ -26,14 +26,13 @@ FROM mcr.microsoft.com/playwright:v1.63.0-noble AS runner
 WORKDIR /app
 
 # Install lightweight Xvfb virtual display server
-RUN apt-get update && apt-get install -y --no-install-recommends xvfb \
+RUN apt-get update && apt-get install -y --no-install-recommends xvfb xauth \
  && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     PORT=10000 \
     HOST=0.0.0.0 \
     HEADLESS=false \
-    DISPLAY=:99 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATCHRIGHT_BROWSERS_PATH=/ms-playwright \
     # Restrict Node V8 heap to ~192MB with --expose-gc so Chromium has ~300MB headroom within Render's 512MB limit
@@ -46,5 +45,5 @@ COPY --from=builder /app/dist ./dist
 # Port exposure (support both Render default 10000 and custom PORT=3000)
 EXPOSE 10000 3000
 
-# Start Xvfb virtual display in background, then launch solver microservice
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x800x24 -ac & node dist/src/index.js"]
+# Wait for the display to be ready before starting the solver.
+CMD ["xvfb-run", "-a", "-s", "-screen 0 1280x800x24 -nolisten tcp", "node", "dist/src/index.js"]
