@@ -1,9 +1,11 @@
 import { lookup } from 'node:dns/promises';
-import { createServer } from 'node:http';
-import { connect, type AddressInfo } from 'node:net';
+import { createServer, request as requestHttp } from 'node:http';
+import { request as requestHttps } from 'node:https';
+import { connect, type AddressInfo, type Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { logInfo, logWarn } from './config';
 import { isPrivateOrReservedIp } from './security';
+import type { ProxyConfig } from './types';
 
 let recordedProbe = false;
 
@@ -21,7 +23,31 @@ export function probeLeetCodeConnectivity() {
     .catch(error => logWarn('LeetCode direct HTTPS probe failed', { error: String(error) }));
 }
 
-export async function openLeetCodeEgress(): Promise<{ server: string; close: () => void }> {
+function connectViaProxy(proxy: ProxyConfig, host: string): Promise<Socket> {
+  const address = new URL(proxy.server);
+  const send = address.protocol === 'https:' ? requestHttps : requestHttp;
+  return new Promise<Socket>((resolve, reject) => {
+    const headers: Record<string, string> = { Host: `${host}:443` };
+    if (proxy.username || proxy.password) {
+      headers['Proxy-Authorization'] = `Basic ${Buffer.from(`${proxy.username ?? ''}:${proxy.password ?? ''}`).toString('base64')}`;
+    }
+    const request = send(address, { method: 'CONNECT', path: `${host}:443`, headers });
+    request.once('error', reject);
+    request.once('connect', (response, socket, head) => {
+      if (response.statusCode !== 200) {
+        socket.destroy();
+        reject(new Error(`LeetCode proxy rejected CONNECT with HTTP ${response.statusCode}`));
+        return;
+      }
+      if (head.length) socket.unshift(head);
+      resolve(socket);
+    });
+    request.setTimeout(12_000, () => request.destroy(new Error('LeetCode proxy CONNECT timed out')));
+    request.end();
+  });
+}
+
+export async function openLeetCodeEgress(proxy?: ProxyConfig): Promise<{ server: string; close: () => void }> {
   const sockets = new Set<Duplex>();
   const server = createServer((_request, response) => response.writeHead(403).end());
   server.on('connection', socket => {
@@ -44,6 +70,26 @@ export async function openLeetCodeEgress(): Promise<{ server: string; close: () 
       }
       if (client.destroyed) return;
 
+      const establish = (upstream: Socket) => {
+        upstream.setTimeout(0);
+        if (host === 'leetcode.com') logInfo('LeetCode browser HTTPS connection established', { upstreamProxy: Boolean(proxy) });
+        client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head.length) upstream.write(head);
+        upstream.pipe(client);
+        client.pipe(upstream);
+      };
+
+      if (proxy) {
+        const upstream = await connectViaProxy(proxy, host);
+        if (client.destroyed) { upstream.destroy(); return; }
+        sockets.add(upstream);
+        upstream.once('close', () => sockets.delete(upstream));
+        upstream.on('error', () => client.destroy());
+        client.once('close', () => upstream.destroy());
+        establish(upstream);
+        return;
+      }
+
       const upstream = connect({ host: addresses[0]!.address, port: 443 });
       let established = false;
       sockets.add(upstream);
@@ -60,15 +106,10 @@ export async function openLeetCodeEgress(): Promise<{ server: string; close: () 
       });
       upstream.once('connect', () => {
         established = true;
-        if (host === 'leetcode.com') logInfo('LeetCode browser HTTPS connection established');
-        upstream.setTimeout(0);
-        client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-        if (head.length) upstream.write(head);
-        upstream.pipe(client);
-        client.pipe(upstream);
+        establish(upstream);
       });
     } catch (error) {
-      logWarn('LeetCode HTTPS egress could not resolve host', { host, code: (error as NodeJS.ErrnoException).code });
+      logWarn('LeetCode HTTPS egress failed', { host, error: String(error) });
       client.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
     }
   });

@@ -308,8 +308,8 @@ async function executeSingleSolveAttempt(
       proxyServer: proxyConfig?.server ? maskProxy(proxyConfig.server) : 'direct',
     });
 
-    if (req.siteurl === LEETCODE_LOGIN_URL && !proxyConfig && !req.cookies) {
-      egress = await openLeetCodeEgress();
+    if (req.siteurl === LEETCODE_LOGIN_URL && !req.cookies && (!proxyConfig || /^https?:\/\//.test(proxyConfig.server))) {
+      egress = await openLeetCodeEgress(proxyConfig);
     }
     context = await browserManager.createContext(egress ?? proxyConfig, req.userAgent, Boolean(egress));
     signal.throwIfAborted();
