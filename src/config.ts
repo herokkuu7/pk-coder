@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { readFileSync } from 'node:fs';
 import type { ProxyConfig } from './types';
 import { sanitizeLogMeta } from './security';
 
@@ -19,6 +20,23 @@ export const config = {
   defaultProxyUsername: process.env.PROXY_USERNAME?.trim(),
   defaultProxyPassword: process.env.PROXY_PASSWORD?.trim(),
 };
+
+export function getContainerMemory() {
+  if (process.platform !== 'linux') return;
+  const readMiB = (file: string) => {
+    try {
+      const bytes = Number(readFileSync(`/sys/fs/cgroup/${file}`, 'utf8').trim());
+      return Number.isFinite(bytes) ? Math.round(bytes / 1024 ** 2) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    usedMiB: readMiB('memory.current'),
+    peakMiB: readMiB('memory.peak'),
+    limitMiB: readMiB('memory.max'),
+  };
+}
 
 /**
  * Parses and normalizes proxy configurations from string or object formats.

@@ -1,7 +1,7 @@
 import type { Page, BrowserContext, Frame } from 'patchright';
 import { BrowserManager } from './browser';
 import { ConcurrencyQueue } from './queue';
-import { config, logInfo, logWarn, parseProxy } from './config';
+import { config, getContainerMemory, logInfo, logWarn, parseProxy } from './config';
 import { proxyPool, maskProxy } from './proxyPool';
 import { validateTargetUrl } from './security';
 import { interactWithTurnstileCheckbox, isTurnstileCheckboxVisible } from './stealth';
@@ -289,6 +289,8 @@ async function executeSingleSolveAttempt(
 
   let context: BrowserContext | null = null;
   let page: Page | null = null;
+  const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
+  let stage = 'create_context';
   const onAbort = () => { void context?.close().catch(() => {}); };
   signal.addEventListener('abort', onAbort, { once: true });
 
@@ -365,7 +367,12 @@ async function executeSingleSolveAttempt(
       }
     }
 
+    stage = 'create_page';
     page = await context.newPage();
+    stage = 'solve';
+    if (leetCodeLogin) {
+      logInfo('LeetCode browser page ready', { elapsedMs: Date.now() - attemptStartTime, containerMemory: getContainerMemory() });
+    }
 
     page.setDefaultTimeout(timeoutMs);
 
@@ -459,6 +466,8 @@ async function executeSingleSolveAttempt(
       durationMs,
       state: errState,
       error: message,
+      stage,
+      ...(leetCodeLogin ? { containerMemory: getContainerMemory() } : {}),
     });
 
     return {
@@ -891,7 +900,7 @@ async function solveWithNavigation(
   }).catch(() => {});
 
   const response = await page.goto(req.siteurl, {
-    waitUntil: 'domcontentloaded',
+    waitUntil: leetCodeLogin ? 'commit' : 'domcontentloaded',
     timeout: Math.min(timeoutMs, 25000),
   });
   if (response?.status() === 407) return { error: 'Proxy authentication required (HTTP 407)' };

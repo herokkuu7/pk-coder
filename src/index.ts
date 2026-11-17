@@ -1,7 +1,7 @@
 import express, { type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import cors from 'cors';
-import { config, logInfo, logWarn, logError, getLogs, requestLogContext } from './config';
+import { config, getContainerMemory, logInfo, logWarn, logError, getLogs, requestLogContext } from './config';
 import { requiresTurnstileToken, solveTurnstile, solverQueue, solverStats, lastDebugScreenshot } from './solver';
 import { solveLeetCodeLogin } from './leetcodeLogin';
 import { proxyPool } from './proxyPool';
@@ -139,7 +139,7 @@ app.get('/stats', requireApiAuth, (_req: Request, res: Response) => {
     solverQueue.waiting,
     browserManager.restarts,
   );
-  res.status(200).json(stats);
+  res.status(200).json({ ...stats, containerMemory: getContainerMemory() });
 });
 
 /**

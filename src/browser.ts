@@ -68,7 +68,7 @@ export class BrowserManager {
 
         const instance = await chromium.launch({
           headless: config.headless,
-          args: STEALTH_CHROMIUM_ARGS,
+          args: display ? [...STEALTH_CHROMIUM_ARGS, '--renderer-process-limit=2'] : STEALTH_CHROMIUM_ARGS,
           timeout: 30000,
           ...(display ? { env: { ...process.env, DISPLAY: display } } : {}),
         });
