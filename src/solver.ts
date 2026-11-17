@@ -65,7 +65,20 @@ export const solverStats = new SolverStatsManager();
 export let lastDebugScreenshot: Buffer | null = null;
 
 const PROXY_OR_TUNNEL_ERROR_RE =
-  /ERR_HTTP_RESPONSE_CODE_FAILURE|ERR_PROXY_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|Challenge iframe network failure/i;
+  /ERR_HTTP_RESPONSE_CODE_FAILURE|ERR_PROXY_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED|ERR_SOCKS_CONNECTION_FAILED|Challenge iframe network failure|Proxy authentication required \(HTTP 407\)/i;
+
+function isLeetCodeLoginUrl(siteurl: string): boolean {
+  try {
+    const url = new URL(siteurl);
+    return url.hostname === 'leetcode.com' && /^\/accounts\/login\/?$/.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function requiresTurnstileToken(req: Pick<SolveRequest, 'siteurl' | 'sitekey'>): boolean {
+  return isLeetCodeLoginUrl(req.siteurl) || Boolean(req.sitekey && req.sitekey !== '0x4AAAAAAADnPIDROrmt1Wwj');
+}
 
 /**
  * Strips single-use Cloudflare challenge token query params (`__cf_chl_*`) and
@@ -400,8 +413,7 @@ async function executeSingleSolveAttempt(
 
     // Interstitial challenge key (0x4AAAAAAADnPIDROrmt1Wwj) only needs clearance cookies.
     // Interactive form widget keys (e.g. 0x4AAAAAACDz1ltMYNJCAQZS) strictly require a token.
-    const isInterstitialKey = req.sitekey === '0x4AAAAAAADnPIDROrmt1Wwj';
-    const isSuccessful = (req.sitekey && !isInterstitialKey)
+    const isSuccessful = requiresTurnstileToken(req)
       ? hasValidToken
       : (hasValidToken || hasClearance || hasCookies);
 
@@ -488,7 +500,7 @@ export async function solveTurnstile(rawReq: SolveRequest, signal?: AbortSignal)
     siteurl: sanitizeTargetSiteUrl(rawReq.siteurl),
   };
   const totalTimeoutMs = req.timeout ?? config.defaultTimeoutMs;
-  const mode: SolverMode = req.mode ?? 'harness';
+  const mode: SolverMode = isLeetCodeLoginUrl(req.siteurl) ? 'navigate' : (req.mode ?? 'harness');
   const directFallbackEnabled = process.env.CPSOLVER_DISABLE_DIRECT_FALLBACK !== 'true';
 
   const runDirectFallbackIfEligible = async (
@@ -852,20 +864,32 @@ async function solveWithNavigation(
     return route.fallback();
   }).catch(() => {});
 
-  await page.goto(req.siteurl, {
+  const response = await page.goto(req.siteurl, {
     waitUntil: 'domcontentloaded',
     timeout: Math.min(timeoutMs, 25000),
   });
+  if (response?.status() === 407) return { error: 'Proxy authentication required (HTTP 407)' };
 
   const deadline = startTime + timeoutMs;
   let lastClickTime = 0;
-  const isInterstitialKey = req.sitekey === '0x4AAAAAAADnPIDROrmt1Wwj';
-  const requiresToken = Boolean(req.sitekey && !isInterstitialKey);
+  const requiresToken = requiresTurnstileToken(req);
+  const leetCodeLogin = isLeetCodeLoginUrl(req.siteurl);
+  const readToken = async (): Promise<string | null> => {
+    if (!leetCodeLogin) return extractTokenFromPage(page);
+    // The interstitial and the rendered LeetCode sign-in form have separate
+    // verification steps. Only read the response field on the real form.
+    return page.evaluate(() => {
+      if (location.hostname !== 'leetcode.com' || !/^\/accounts\/login\/?$/.test(location.pathname)) return null;
+      if (!document.querySelector('input[type="password"]')) return null;
+      const inputs = document.querySelectorAll<HTMLInputElement>('input[name="cf-turnstile-response"]');
+      return Array.from(inputs, input => input.value.trim()).find(value => value.length > 10) ?? null;
+    }).catch(() => null);
+  };
 
   while (Date.now() < deadline) {
     signal.throwIfAborted();
     // 1. Check for a real Turnstile token on the page
-    const token = await extractTokenFromPage(page);
+    const token = await readToken();
     if (token) return { token };
 
     // 2. Check if cf_clearance was issued (real cookie value)
@@ -886,7 +910,7 @@ async function solveWithNavigation(
       !url.includes('__cf_chl_rt_tk')
     ) {
       // Page is no longer on Cloudflare challenge — check for token or real clearance
-      const tokenFinal = await extractTokenFromPage(page);
+      const tokenFinal = await readToken();
       if (tokenFinal) return { token: tokenFinal };
       // Re-check cookies since page navigation may have set them
       const freshCookies = await page.context().cookies().catch(() => []);
@@ -908,7 +932,7 @@ async function solveWithNavigation(
   }
 
   // Final check before timeout
-  const finalToken = await extractTokenFromPage(page);
+  const finalToken = await readToken();
   if (finalToken) return { token: finalToken };
 
   if (!requiresToken) {

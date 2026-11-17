@@ -7,7 +7,7 @@ import {
   sanitizeLogMeta,
 } from '../src/security';
 import { parseProxy, config, logInfo, getLogs } from '../src/config';
-import { sanitizeTargetSiteUrl, isProxyOrTunnelError, solverQueue } from '../src/solver';
+import { sanitizeTargetSiteUrl, isProxyOrTunnelError, requiresTurnstileToken, solverQueue } from '../src/solver';
 import { ConcurrencyQueue, QueueFullError } from '../src/queue';
 import { BrowserManager } from '../src/browser';
 
@@ -74,11 +74,13 @@ async function runTests() {
     proxyServer: 'http://alice:supersecret@gate.example.com:9001',
     password: 'my-password',
     cfClearance: 'secret-cookie-value',
+    storageState: { cookies: [{ name: 'LEETCODE_SESSION', value: 'jwt' }], origins: [] },
     nested: { authorization: 'Bearer secret123', safeField: 'ok' },
   });
   assert.equal(redacted?.proxyServer, 'http://alice:****@gate.example.com:9001');
   assert.equal(redacted?.password, '[REDACTED]');
   assert.equal(redacted?.cfClearance, '[REDACTED]');
+  assert.equal(redacted?.storageState, '[REDACTED]');
   assert.equal((redacted?.nested as any)?.authorization, '[REDACTED]');
   assert.equal((redacted?.nested as any)?.safeField, 'ok');
 
@@ -105,7 +107,11 @@ async function runTests() {
   assert.equal(isProxyOrTunnelError('page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at https://leetcode.com/'), true);
   assert.equal(isProxyOrTunnelError('net::ERR_TUNNEL_CONNECTION_FAILED'), true);
   assert.equal(isProxyOrTunnelError('net::ERR_PROXY_CONNECTION_FAILED'), true);
+  assert.equal(isProxyOrTunnelError('Proxy authentication required (HTTP 407)'), true);
   assert.equal(isProxyOrTunnelError('Turnstile challenge timed out after 45000ms without token'), false);
+  assert.equal(requiresTurnstileToken({ siteurl: 'https://leetcode.com/accounts/login/?next=%2F' }), true);
+  assert.equal(requiresTurnstileToken({ siteurl: 'https://leetcode.com/accounts/login/', sitekey: '0x4AAAAAAADnPIDROrmt1Wwj' }), true);
+  assert.equal(requiresTurnstileToken({ siteurl: 'https://leetcode.com/problems/two-sum/' }), false);
   console.log('✓ URL sanitization and proxy error classification passed');
 
   const queue = new ConcurrencyQueue(1, 1);
@@ -144,6 +150,7 @@ async function runTests() {
     // Sensitive routes must reject unauthenticated requests
     const protectedRoutes: Array<[string, string]> = [
       ['POST', '/solve'],
+      ['POST', '/leetcode-login'],
       ['GET', '/logs'],
       ['GET', '/screenshot'],
       ['GET', '/proxies'],
@@ -231,6 +238,20 @@ async function runTests() {
       body: JSON.stringify({ siteurl: 'https://example.com', timeout: 50 }),
     });
     assert.equal(badTimeoutRes.status, 400);
+
+    const missingCredsRes = await fetch(`${baseUrl}/leetcode-login`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ username: 'scale5558' }),
+    });
+    assert.equal(missingCredsRes.status, 400);
+
+    const badLoginTimeoutRes = await fetch(`${baseUrl}/leetcode-login`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ username: 'scale5558', password: 'secret', timeout: 500 }),
+    });
+    assert.equal(badLoginTimeoutRes.status, 400);
 
     console.log('✓ HTTP API authentication, CORS, schema validation, and SSRF protection passed');
   } finally {

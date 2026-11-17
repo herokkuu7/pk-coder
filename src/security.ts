@@ -267,7 +267,7 @@ export async function validateTargetUrl(
   return { ok: true, url: parsed };
 }
 
-const SENSITIVE_KEY_RE = /pass(word)?|secret|token|cookie|authorization|api[-_]?key|cfclearance/i;
+const SENSITIVE_KEY_RE = /pass(word)?|secret|token|cookie|storageState|authorization|api[-_]?key|cfclearance/i;
 
 export function maskUrlCredentials(value: string): string {
   return value.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:/@\s]+):[^@\s]+@/g, '$1:****@');

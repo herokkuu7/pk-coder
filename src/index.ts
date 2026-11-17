@@ -2,12 +2,13 @@ import express, { type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import cors from 'cors';
 import { config, logInfo, logWarn, logError, getLogs, requestLogContext } from './config';
-import { solveTurnstile, solverQueue, solverStats, lastDebugScreenshot } from './solver';
+import { requiresTurnstileToken, solveTurnstile, solverQueue, solverStats, lastDebugScreenshot } from './solver';
+import { solveLeetCodeLogin } from './leetcodeLogin';
 import { proxyPool } from './proxyPool';
 import { BrowserManager } from './browser';
 import { QueueFullError } from './queue';
 import { buildCorsOptions, requireApiAuth, validateTargetUrl } from './security';
-import type { SolveRequest, HealthResponse, SolverMode } from './types';
+import type { SolveRequest, HealthResponse, SolverMode, LeetCodeLoginRequest } from './types';
 
 export const app = express();
 const inFlightRequestIds = new Set<string>();
@@ -27,6 +28,20 @@ app.use('/solve', (req, res, next) => {
   });
   requestLogContext.run({ requestId }, () => {
     logInfo('Solve HTTP request received', { mode: req.body?.mode, sitekeyPresent: !!req.body?.sitekey });
+    next();
+  });
+});
+
+app.use('/leetcode-login', (req, res, next) => {
+  const supplied = req.header('x-request-id');
+  const requestId = supplied && /^[a-zA-Z0-9_-]{1,128}$/.test(supplied) ? supplied : randomUUID();
+  const startedAt = Date.now();
+  res.setHeader('x-request-id', requestId);
+  res.on('finish', () => logInfo('LeetCode remote login completed', {
+    requestId, status: res.statusCode, durationMs: Date.now() - startedAt,
+  }));
+  requestLogContext.run({ requestId }, () => {
+    logInfo('LeetCode remote login request received', { hasProxy: Boolean(req.body?.proxy) });
     next();
   });
 });
@@ -256,7 +271,7 @@ app.post('/solve', requireApiAuth, async (req: Request, res: Response): Promise<
 
     // Interstitial challenge key (0x4AAAAAAADnPIDROrmt1Wwj) or navigation-only solves succeed via clearance cookies.
     // Form widget keys (e.g. 0x4AAAAAACDz1ltMYNJCAQZS on Codeforces problem submit) strictly require an interactive token.
-    const requiresToken = Boolean(solveReq.sitekey && solveReq.sitekey !== '0x4AAAAAAADnPIDROrmt1Wwj');
+    const requiresToken = requiresTurnstileToken(solveReq);
 
     const isSuccess = result.ok && (
       requiresToken
@@ -316,6 +331,59 @@ app.all('/solve', (_req: Request, res: Response) => {
     ok: false,
     error: 'Use POST /solve with a Bearer API token and a JSON body containing siteurl.',
   });
+});
+
+/**
+ * Single-IP remote LeetCode login endpoint.
+ * Runs inside CPSolver's headed Patchright (Xvfb) context so any Cloudflare challenge
+ * and form submission share the exact same IP and TLS session, eliminating cf_clearance
+ * cross-service IP mismatch.
+ */
+app.post('/leetcode-login', requireApiAuth, async (req: Request, res: Response): Promise<void> => {
+  const body = req.body as Partial<LeetCodeLoginRequest>;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    res.status(400).json({ ok: false, code: 'INVALID_REQUEST', error: 'Missing JSON request body' });
+    return;
+  }
+
+  const username = typeof body.username === 'string' ? body.username.trim() : '';
+  const password = typeof body.password === 'string' ? body.password : '';
+  if (!username || !password) {
+    res.status(400).json({ ok: false, code: 'CREDENTIALS_REQUIRED', error: 'Both "username" and "password" are required' });
+    return;
+  }
+
+  if (body.timeout !== undefined && (typeof body.timeout !== 'number' || body.timeout < 15_000 || body.timeout > 180_000)) {
+    res.status(400).json({ ok: false, code: 'INVALID_TIMEOUT', error: '"timeout" must be between 15000 and 180000 ms' });
+    return;
+  }
+
+  try {
+    const result = await solveLeetCodeLogin({
+      username,
+      password,
+      proxy: body.proxy,
+      timeout: body.timeout,
+    });
+
+    if (result.ok) {
+      res.status(200).json(result);
+      return;
+    }
+
+    res.status(422).json(result);
+  } catch (err) {
+    if (res.destroyed) return;
+    if (err instanceof QueueFullError) {
+      res.status(429).json({ ok: false, code: 'QUEUE_FULL', error: err.message });
+      return;
+    }
+    res.status(500).json({
+      ok: false,
+      code: 'LOGIN_INTERNAL_ERROR',
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 });
 
 // Start listening if executed directly

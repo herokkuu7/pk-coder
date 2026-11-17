@@ -76,3 +76,26 @@ export interface HealthResponse {
     activeProxy: string | null;
   };
 }
+
+export interface LeetCodeLoginRequest {
+  username: string;
+  password: string;
+  proxy?: string | ProxyConfig;
+  timeout?: number;
+}
+
+export interface LeetCodeLoginStorageState {
+  cookies: Array<Record<string, unknown>>;
+  origins: Array<Record<string, unknown>>;
+}
+
+export interface LeetCodeLoginResult {
+  ok: boolean;
+  username?: string;
+  code?: string;
+  error?: string;
+  storageState?: LeetCodeLoginStorageState;
+  durationMs: number;
+  proxyUsed?: string;
+  challengeObserved?: string;
+}
