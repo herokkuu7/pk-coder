@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { config } from './config';
 import { QueueFullError } from './queue';
+import { solverStats } from './solver';
 import type { SolveResult } from './types';
 
 interface Job {
@@ -20,8 +21,11 @@ class LeetCodeWorkerBroker {
     return this.worker !== undefined && Date.now() - this.worker.seenAt < LEASE_MS;
   }
 
-  register(): string | undefined {
-    if (this.available) return;
+  register(options?: { replace?: boolean }): string | undefined {
+    const hasInFlightJob = [...this.jobs.values()].some(
+      (job) => Boolean(job.claimedBy) && job.deadline > Date.now(),
+    );
+    if (this.available && hasInFlightJob && !options?.replace) return;
     const token = randomBytes(32).toString('base64url');
     this.worker = { token, seenAt: Date.now() };
     for (const job of this.jobs.values()) job.claimedBy = undefined;
@@ -59,12 +63,21 @@ class LeetCodeWorkerBroker {
     const startedAt = Date.now();
     const id = randomUUID();
     return new Promise(resolve => {
+      let settled = false;
       const onAbort = () => finish(undefined, 'CANCELLED');
       const timer = setTimeout(() => finish(undefined, 'TIMED_OUT'), timeout);
       const finish: Job['finish'] = (token, state) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
         this.jobs.delete(id);
+        const durationMs = Date.now() - startedAt;
+        if (token) {
+          solverStats?.recordSuccess?.(durationMs);
+        } else {
+          solverStats?.recordFailure?.();
+        }
         resolve({
           ok: Boolean(token),
           state: token ? 'VERIFICATION_COMPLETED' : (state ?? 'VERIFICATION_FAILED'),
@@ -74,7 +87,7 @@ class LeetCodeWorkerBroker {
             : 'Private LeetCode worker did not return a login verification token',
           modeUsed: 'navigate',
           proxyUsed: 'private-browser-worker',
-          durationMs: Date.now() - startedAt,
+          durationMs,
         });
       };
       this.jobs.set(id, { id, deadline: startedAt + timeout, finish });

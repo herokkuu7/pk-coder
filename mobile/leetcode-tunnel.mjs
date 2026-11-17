@@ -62,7 +62,11 @@ function dialRender() {
     if (!Number.isInteger(id) || id < 0 || id > 0xffffffff) return;
     if (message.t === 'close') {
       opening.delete(id);
-      streams.get(id)?.end();
+      const s = streams.get(id);
+      if (s) {
+        if (s.connecting) s.destroy();
+        else s.end();
+      }
       return;
     }
     if (message.t !== 'open') return;

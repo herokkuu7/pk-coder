@@ -184,8 +184,8 @@ function buildHostHtml(sitekey: string, action?: string, cdata?: string): string
 async function extractTokenFromPage(page: Page): Promise<string | null> {
   const title = await page.title().catch(() => '');
   if (typeof title === 'string' && title.startsWith('TURNSTILE_TOKEN:')) {
-    const tok = title.slice('TURNSTILE_TOKEN:'.length);
-    if (tok.length > 5) return tok;
+    const tok = title.slice('TURNSTILE_TOKEN:'.length).trim();
+    if (tok.length > 10) return tok;
   }
   const fromEval = await page.evaluate(() => {
     const win = window as unknown as {
@@ -193,14 +193,14 @@ async function extractTokenFromPage(page: Page): Promise<string | null> {
       turnstile?: { getResponse?: (id?: string) => string };
     };
 
-    if (typeof win.__turnstileToken === 'string' && win.__turnstileToken.length > 5) {
-      return win.__turnstileToken;
+    if (typeof win.__turnstileToken === 'string' && win.__turnstileToken.trim().length > 10) {
+      return win.__turnstileToken.trim();
     }
 
     if (typeof win.turnstile?.getResponse === 'function') {
       try {
         const resp = win.turnstile.getResponse();
-        if (resp && resp.length > 5) return resp;
+        if (typeof resp === 'string' && resp.trim().length > 10) return resp.trim();
       } catch {}
     }
 
@@ -210,8 +210,8 @@ async function extractTokenFromPage(page: Page): Promise<string | null> {
     );
     for (const inp of Array.from(inputs)) {
       const val = (inp as HTMLInputElement).value;
-      if (typeof val === 'string' && val.length > 5) {
-        return val;
+      if (typeof val === 'string' && val.trim().length > 10) {
+        return val.trim();
       }
     }
 
@@ -228,16 +228,16 @@ async function extractTokenFromPage(page: Page): Promise<string | null> {
     try {
       const frameVal = await f.evaluate(() => {
         const win = window as any;
-        if (typeof win.__turnstileToken === 'string' && win.__turnstileToken.length > 5) {
-          return win.__turnstileToken;
+        if (typeof win.__turnstileToken === 'string' && win.__turnstileToken.trim().length > 10) {
+          return win.__turnstileToken.trim();
         }
         const inputs = document.querySelectorAll(
           'input[name*="turnstile"], input[id*="turnstile"], input[id*="cf-chl-widget"], input[name="cf-turnstile-response"]'
         );
         for (const inp of Array.from(inputs)) {
           const val = (inp as HTMLInputElement).value;
-          if (typeof val === 'string' && val.length > 5) {
-            return val;
+          if (typeof val === 'string' && val.trim().length > 10) {
+            return val.trim();
           }
         }
         return null;
@@ -248,12 +248,12 @@ async function extractTokenFromPage(page: Page): Promise<string | null> {
 
   try {
     const val = await page.locator('input[name="cf-turnstile-response"]').inputValue({ timeout: 150 });
-    if (val && val.length > 5) return val;
+    if (val && val.trim().length > 10) return val.trim();
   } catch {}
 
   try {
     const val2 = await page.locator('input[name="turnstileToken"]').inputValue({ timeout: 150 });
-    if (val2 && val2.length > 5) return val2;
+    if (val2 && val2.trim().length > 10) return val2.trim();
   } catch {}
 
   return null;
@@ -310,7 +310,7 @@ async function executeSingleSolveAttempt(
       proxyServer: proxyConfig?.server ? maskProxy(proxyConfig.server) : 'direct',
     });
 
-    if (req.siteurl === LEETCODE_LOGIN_URL && !req.cookies && (!proxyConfig || /^https?:\/\//.test(proxyConfig.server))) {
+    if ((req.siteurl === LEETCODE_LOGIN_URL || (leetCodeLogin && mobileDial)) && !req.cookies && (!proxyConfig || /^https?:\/\//.test(proxyConfig.server))) {
       egress = await openLeetCodeEgress(proxyConfig, mobileDial);
     }
     context = await browserManager.createContext(egress ?? proxyConfig, req.userAgent, Boolean(egress));
@@ -401,6 +401,11 @@ async function executeSingleSolveAttempt(
     }
     signal.throwIfAborted();
 
+    const isRealClearance = (value: unknown): value is string =>
+      typeof value === 'string' &&
+      value.trim().length > 5 &&
+      !['cleared', 'ok', 'true', 'success', 'solved', 'null', 'undefined'].includes(value.trim().toLowerCase());
+
     // Extract all cookies from context
     let cookiesRecord: Record<string, string> | undefined;
     let cfClearance: string | undefined;
@@ -410,8 +415,8 @@ async function executeSingleSolveAttempt(
         cookiesRecord = {};
         for (const c of cookies) {
           cookiesRecord[c.name] = c.value;
-          if (c.name === 'cf_clearance' && c.value.length > 5) {
-            cfClearance = c.value;
+          if (c.name === 'cf_clearance' && isRealClearance(c.value)) {
+            cfClearance = c.value.trim();
           }
         }
       }
@@ -419,19 +424,19 @@ async function executeSingleSolveAttempt(
 
     const durationMs = Date.now() - attemptStartTime;
 
-    const resolvedClearance =
-      stepResult.cfClearance && stepResult.cfClearance !== 'cleared'
-        ? stepResult.cfClearance
-        : cfClearance;
+    const resolvedClearance = isRealClearance(stepResult.cfClearance)
+      ? stepResult.cfClearance.trim()
+      : cfClearance;
     const hasValidToken = typeof stepResult.token === 'string' && stepResult.token.trim().length > 10;
-    const hasClearance = Boolean(resolvedClearance && resolvedClearance.trim().length > 5);
-    const hasCookies = !!(cookiesRecord && Object.keys(cookiesRecord).some((k) => k.toLowerCase().startsWith('cf_')));
+    const hasClearance = isRealClearance(resolvedClearance);
 
     // Interstitial challenge key (0x4AAAAAAADnPIDROrmt1Wwj) only needs clearance cookies.
     // Interactive form widget keys (e.g. 0x4AAAAAACDz1ltMYNJCAQZS) strictly require a token.
-    const isSuccessful = requiresTurnstileToken(req)
-      ? hasValidToken
-      : (hasValidToken || hasClearance || hasCookies);
+    const isSuccessful = !stepResult.error && (
+      requiresTurnstileToken(req)
+        ? hasValidToken
+        : (hasValidToken || hasClearance)
+    );
 
     if (isSuccessful) {
       logInfo('Turnstile / Cloudflare solved successfully', {

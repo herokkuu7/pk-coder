@@ -23,6 +23,7 @@ export class BrowserManager {
   private browserRestarts = 0;
   private cachedUserAgent: string | null = null;
   private virtualDisplay: VirtualDisplay | null = null;
+  private closed = false;
 
   private constructor() {}
 
@@ -50,8 +51,14 @@ export class BrowserManager {
    * Ensures that if browser recycling is currently underway, callers await completion.
    */
   public async ensureBrowser(): Promise<Browser> {
+    if (this.closed) {
+      throw new Error('BrowserManager is closed');
+    }
     if (this.recyclingPromise) {
       await this.recyclingPromise;
+    }
+    if (this.closed) {
+      throw new Error('BrowserManager is closed');
     }
 
     return this.getOrLaunchBrowser();
@@ -59,6 +66,9 @@ export class BrowserManager {
 
   // Recycling owns the lifecycle gate and must not wait on itself.
   private async getOrLaunchBrowser(): Promise<Browser> {
+    if (this.closed) {
+      throw new Error('BrowserManager is closed');
+    }
 
     if (this.browser && this.browser.isConnected()) {
       return this.browser;
@@ -71,6 +81,9 @@ export class BrowserManager {
     this.launchingPromise = (async () => {
       try {
         const display = await this.ensureVirtualDisplay();
+        if (this.closed) {
+          throw new Error('BrowserManager is closed');
+        }
         logInfo('Launching Chromium instance with memory-conservative flags...', {
           headless: config.headless,
           maxOldSpace: 160,
@@ -85,6 +98,11 @@ export class BrowserManager {
             : {}),
           ...(display ? { env: { ...process.env, DISPLAY: display } } : {}),
         });
+
+        if (this.closed) {
+          await instance.close().catch(() => {});
+          throw new Error('BrowserManager is closed');
+        }
 
         instance.on('disconnected', () => {
           logWarn('Chromium disconnected or terminated.');
@@ -113,11 +131,15 @@ export class BrowserManager {
   }
 
   private async ensureVirtualDisplay(): Promise<string | undefined> {
-    if (config.headless || process.platform !== 'linux' || process.env.CPSOLVER_MANAGE_XVFB !== 'true') return;
+    if (this.closed || config.headless || process.platform !== 'linux' || process.env.CPSOLVER_MANAGE_XVFB !== 'true') return;
     if (this.virtualDisplay) return this.virtualDisplay.name;
 
     logInfo('Starting Xvfb for headed Chromium');
     const display = await startVirtualDisplay();
+    if (this.closed) {
+      display.process.kill();
+      return;
+    }
     this.virtualDisplay = display;
     display.process.once('exit', (code, signal) => {
       if (this.virtualDisplay === display) {
@@ -134,11 +156,20 @@ export class BrowserManager {
    * Configures lightweight resource blocking to conserve memory on 512MB RAM instances.
    */
   public async createContext(proxyConfig?: ProxyConfig, overrideUserAgent?: string, proxyLoopback = false): Promise<BrowserContext> {
+    if (this.closed) {
+      throw new Error('BrowserManager is closed');
+    }
     if (this.recyclingPromise) {
       await this.recyclingPromise;
     }
+    if (this.closed) {
+      throw new Error('BrowserManager is closed');
+    }
 
     const browser = await this.ensureBrowser();
+    if (this.closed) {
+      throw new Error('BrowserManager is closed');
+    }
     const viewport = containerChromium ? { width: 1024, height: 768 } : getRandomDesktopViewport();
 
     const playwrightProxy = proxyConfig?.server
@@ -179,7 +210,7 @@ export class BrowserManager {
    * and no active solves are currently using the browser.
    */
   public async notifySolveCompleted(activeCount = 0): Promise<void> {
-    if (!this.isAlive) return;
+    if (this.closed || !this.isAlive) return;
     this.solvesCount++;
     const mem = process.memoryUsage();
     const rssMb = Math.round(mem.rss / 1024 / 1024);
@@ -187,7 +218,7 @@ export class BrowserManager {
     const needsRecycle =
       this.solvesCount >= config.maxSolvesBeforeRecycle || rssMb >= config.maxRssMb;
 
-    if (needsRecycle && activeCount <= 1 && !this.recyclingPromise) {
+    if (needsRecycle && activeCount <= 1 && !this.recyclingPromise && !this.closed) {
       logInfo('Recycling browser to prevent memory accumulation in 512MB cgroup', {
         solvesCount: this.solvesCount,
         rssMb,
@@ -204,6 +235,7 @@ export class BrowserManager {
    * Gracefully and safely restarts the Chromium instance under a mutex.
    */
   public async recycle(): Promise<void> {
+    if (this.closed) return;
     if (this.recyclingPromise) {
       return this.recyclingPromise;
     }
@@ -215,6 +247,8 @@ export class BrowserManager {
           this.browser = null;
           await oldBrowser.close().catch(() => {});
         }
+
+        if (this.closed) return;
 
         if (typeof global.gc === 'function') {
           try {
@@ -237,6 +271,7 @@ export class BrowserManager {
    * Process shutdown handler.
    */
   public async close(): Promise<void> {
+    this.closed = true;
     if (this.recyclingPromise) {
       await this.recyclingPromise.catch(() => {});
     }

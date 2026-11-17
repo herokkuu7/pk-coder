@@ -2,7 +2,7 @@ import express, { type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import cors from 'cors';
-import { config, getContainerMemory, logInfo, logWarn, logError, getLogs, requestLogContext } from './config';
+import { config, getContainerMemory, intEnv, logInfo, logWarn, logError, getLogs, requestLogContext } from './config';
 import { requiresTurnstileToken, solveTurnstile, solverQueue, solverStats, lastDebugScreenshot } from './solver';
 import { solveLeetCodeLogin } from './leetcodeLogin';
 import { proxyPool } from './proxyPool';
@@ -55,7 +55,12 @@ app.use('/leetcode-login', (req, res, next) => {
  */
 app.get('/ip', requireApiAuth, async (_req: Request, res: Response) => {
   try {
-    const ip = await fetch('https://api.ipify.org').then((r) => r.text());
+    const response = await fetch('https://api.ipify.org', { signal: AbortSignal.timeout(8_000) });
+    if (!response.ok) {
+      res.status(502).json({ error: `Upstream IP check failed with HTTP ${response.status}` });
+      return;
+    }
+    const ip = await response.text();
     res.status(200).json({ ip });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -146,10 +151,11 @@ app.get('/stats', requireApiAuth, (_req: Request, res: Response) => {
   res.status(200).json({ ...stats, containerMemory: getContainerMemory(), leetCodeWorkerConnected: leetCodeWorkerBroker.available, androidTunnelConnected: Boolean(getMobileDial()) });
 });
 
-app.post('/workers/leetcode/register', requireApiAuth, (_req, res) => {
-  const token = leetCodeWorkerBroker.register();
+app.post('/workers/leetcode/register', requireApiAuth, (req, res) => {
+  const replace = req.body?.replace === true || req.query.replace === '1' || req.query.replace === 'true';
+  const token = leetCodeWorkerBroker.register({ replace });
   if (!token) {
-    res.status(409).json({ error: 'A private LeetCode worker is already connected' });
+    res.status(409).json({ error: 'A private LeetCode worker is already connected and processing a job' });
     return;
   }
   res.set('Cache-Control', 'no-store').status(201).json({ token });
@@ -180,7 +186,7 @@ app.post('/workers/leetcode/:id/result', (req, res) => {
  * In-memory log buffer endpoint for Render debugging and real-time telemetry.
  */
 app.get('/logs', requireApiAuth, (req: Request, res: Response) => {
-  const limit = Math.min(200, Math.max(1, parseInt((req.query.limit as string) || '100', 10)));
+  const limit = intEnv(typeof req.query.limit === 'string' ? req.query.limit : undefined, 100, 1, 200);
   const logs = getLogs(limit);
   if (req.query.format === 'text') {
     res.setHeader('content-type', 'text/plain; charset=utf-8');
@@ -319,18 +325,25 @@ app.post('/solve', requireApiAuth, async (req: Request, res: Response): Promise<
     logInfo('Solve operation finished', { ok: result.ok, state: result.state, mode: result.modeUsed, durationMs: result.durationMs });
     if (res.destroyed) return;
 
+    const isRealClearance = (value: unknown): value is string =>
+      typeof value === 'string' &&
+      value.trim().length > 5 &&
+      !['cleared', 'ok', 'true', 'success', 'solved', 'null', 'undefined'].includes(value.trim().toLowerCase());
+
     const hasToken = typeof result.token === 'string' && result.token.trim().length > 10;
-    const hasClearance = typeof result.cfClearance === 'string' && result.cfClearance.trim().length > 5 && result.cfClearance !== 'cleared';
-    const hasCookies = !!(result.cookies && Object.keys(result.cookies).length > 0);
+    const resolvedClearance = isRealClearance(result.cfClearance)
+      ? result.cfClearance.trim()
+      : (isRealClearance(result.cookies?.cf_clearance) ? result.cookies!.cf_clearance.trim() : undefined);
+    const hasClearance = Boolean(resolvedClearance);
 
     // Interstitial challenge key (0x4AAAAAAADnPIDROrmt1Wwj) or navigation-only solves succeed via clearance cookies.
     // Form widget keys (e.g. 0x4AAAAAACDz1ltMYNJCAQZS on Codeforces problem submit) strictly require an interactive token.
     const requiresToken = requiresTurnstileToken(solveReq);
 
-    const isSuccess = result.ok && (
+    const isSuccess = result.ok && !result.error && (
       requiresToken
         ? hasToken
-        : (hasToken || hasClearance || hasCookies)
+        : (hasToken || hasClearance)
     );
 
     if (isSuccess) {
@@ -339,7 +352,7 @@ app.post('/solve', requireApiAuth, async (req: Request, res: Response): Promise<
         state: result.state ?? 'VERIFICATION_COMPLETED',
         token: result.token,
         cookies: result.cookies,
-        cfClearance: hasClearance ? result.cfClearance : undefined,
+        cfClearance: resolvedClearance,
         durationMs: result.durationMs,
         modeUsed: result.modeUsed,
         proxyUsed: result.proxyUsed,
@@ -412,14 +425,31 @@ app.post('/leetcode-login', requireApiAuth, async (req: Request, res: Response):
     return;
   }
 
-  try {
-    const result = await solveLeetCodeLogin({
-      username,
-      password,
-      proxy: body.proxy,
-      timeout: body.timeout,
-    });
+  if (typeof body.proxy === 'string' && body.proxy.trim().toLowerCase() === 'mobile' && !getMobileDial()) {
+    res.status(503).json({ ok: false, code: 'MOBILE_TUNNEL_DISCONNECTED', error: 'Android tunnel is disconnected' });
+    return;
+  }
 
+  const abortController = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) {
+      abortController.abort(new Error('Client disconnected'));
+    }
+  };
+  res.on('close', onClose);
+
+  try {
+    const result = await solveLeetCodeLogin(
+      {
+        username,
+        password,
+        proxy: body.proxy,
+        timeout: body.timeout,
+      },
+      abortController.signal,
+    );
+
+    if (res.destroyed || res.writableEnded) return;
     if (result.ok) {
       res.status(200).json(result);
       return;
@@ -427,7 +457,7 @@ app.post('/leetcode-login', requireApiAuth, async (req: Request, res: Response):
 
     res.status(422).json(result);
   } catch (err) {
-    if (res.destroyed) return;
+    if (res.destroyed || res.writableEnded) return;
     if (err instanceof QueueFullError) {
       res.status(429).json({ ok: false, code: 'QUEUE_FULL', error: err.message });
       return;
@@ -437,6 +467,8 @@ app.post('/leetcode-login', requireApiAuth, async (req: Request, res: Response):
       code: 'LOGIN_INTERNAL_ERROR',
       error: err instanceof Error ? err.message : String(err),
     });
+  } finally {
+    res.off('close', onClose);
   }
 });
 

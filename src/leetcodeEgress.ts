@@ -33,8 +33,12 @@ function connectViaProxy(proxy: ProxyConfig, host: string): Promise<Socket> {
       headers['Proxy-Authorization'] = `Basic ${Buffer.from(`${proxy.username ?? ''}:${proxy.password ?? ''}`).toString('base64')}`;
     }
     const request = send(address, { method: 'CONNECT', path: `${host}:443`, headers });
+    const onTimeout = () => request.destroy(new Error('LeetCode proxy CONNECT timed out'));
     request.once('error', reject);
     request.once('connect', (response, socket, head) => {
+      request.removeListener('timeout', onTimeout);
+      request.setTimeout(0);
+      socket.setTimeout(0);
       if (response.statusCode !== 200) {
         socket.destroy();
         reject(new Error(`LeetCode proxy rejected CONNECT with HTTP ${response.statusCode}`));
@@ -43,7 +47,7 @@ function connectViaProxy(proxy: ProxyConfig, host: string): Promise<Socket> {
       if (head.length) socket.unshift(head);
       resolve(socket);
     });
-    request.setTimeout(12_000, () => request.destroy(new Error('LeetCode proxy CONNECT timed out')));
+    request.setTimeout(12_000, onTimeout);
     request.end();
   });
 }
@@ -90,7 +94,8 @@ export async function openLeetCodeEgress(proxy?: ProxyConfig, mobileDial?: Mobil
         return;
       }
 
-      const upstream = connect({ host: addresses[0]!.address, port: 443 });
+      const target = addresses.find((a) => a.family === 4) ?? addresses[0]!;
+      const upstream = connect({ host: target.address, family: target.family, port: 443 });
       let established = false;
       sockets.add(upstream);
       upstream.once('close', () => sockets.delete(upstream));

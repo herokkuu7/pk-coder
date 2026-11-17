@@ -1,54 +1,7 @@
 import type { ProxyConfig } from './types';
-import { logInfo, logWarn } from './config';
+import { logInfo, logWarn, normalizeProxyUrl } from './config';
 
-/**
- * Normalizes a single proxy string into a clean URL format.
- * Supports:
- * - standard URLs: http://user:pass@host:port, socks5://user:pass@host:port
- * - host:port:user:pass
- * - user:pass@host:port
- * - host:port
- */
-export function normalizeProxyUrl(raw: string): string | null {
-  let s = raw.trim();
-  if (!s || s.startsWith('#')) return null;
-
-  s = s.replace(/^["'`<(\[]+|["'`>)\]]+$/g, '').trim();
-
-  if (/^(https?|socks[45]h?):\/\//i.test(s)) {
-    try {
-      const u = new URL(s);
-      if (['http:', 'https:', 'socks4:', 'socks5:', 'socks5h:'].includes(u.protocol) && u.hostname) {
-        const auth = u.username ? `${u.username}${u.password ? `:${u.password}` : ''}@` : '';
-        const port = u.port ? `:${u.port}` : '';
-        const path = (u.pathname === '/' || !u.pathname) ? '' : u.pathname;
-        return `${u.protocol}//${auth}${u.hostname}${port}${path}${u.search}`;
-      }
-    } catch {}
-  }
-
-  // host:port:user:pass format
-  const hpupMatch = s.match(/^([a-zA-Z0-9_.-]+):(\d+):([^:@\s]+):([^@\s]+)$/);
-  if (hpupMatch && hpupMatch[1] && hpupMatch[2] && hpupMatch[3] && hpupMatch[4]) {
-    const [, host, port, user, pass] = hpupMatch;
-    return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
-  }
-
-  // user:pass@host:port format
-  const uphMatch = s.match(/^([^:@\s]+):([^@\s]+)@([a-zA-Z0-9_.-]+):(\d+)$/);
-  if (uphMatch && uphMatch[1] && uphMatch[2] && uphMatch[3] && uphMatch[4]) {
-    const [, user, pass, host, port] = uphMatch;
-    return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
-  }
-
-  // host:port format
-  const hpMatch = s.match(/^([a-zA-Z0-9_.-]+):(\d+)$/);
-  if (hpMatch && hpMatch[1] && hpMatch[2]) {
-    return `http://${hpMatch[1]}:${hpMatch[2]}`;
-  }
-
-  return null;
-}
+export { normalizeProxyUrl };
 
 /**
  * Parses comma, newline, or semicolon-separated proxy lists from environment strings.
@@ -77,12 +30,16 @@ export function parseProxyList(raw: string | undefined | null): string[] {
  * Safely masks proxy credentials for logging and telemetry.
  */
 export function maskProxy(proxyUrl: string): string {
+  const normalized = normalizeProxyUrl(proxyUrl) ?? proxyUrl;
   try {
-    const u = new URL(proxyUrl);
+    const u = new URL(normalized);
     const pass = u.password ? ':****' : '';
     const user = u.username ? `${u.username}${pass}@` : '';
     return `${u.protocol}//${user}${u.host}`;
   } catch {
+    if (/^([^:\s]+):(\d+):([^:@\s]+):([^@\s]+)$/.test(proxyUrl.trim())) {
+      return proxyUrl.trim().replace(/^([^:\s]+):(\d+):([^:@\s]+):([^@\s]+)$/, 'http://$3:****@$1:$2');
+    }
     return proxyUrl.replace(/:[^:@]+@/, ':****@');
   }
 }
@@ -92,14 +49,15 @@ export function maskProxy(proxyUrl: string): string {
  */
 export function proxyUrlToConfig(proxyUrl: string): ProxyConfig | undefined {
   if (!proxyUrl) return undefined;
+  const normalized = normalizeProxyUrl(proxyUrl) ?? proxyUrl;
   try {
-    const u = new URL(proxyUrl);
+    const u = new URL(normalized);
     const server = `${u.protocol}//${u.host}`;
     const username = u.username ? decodeURIComponent(u.username) : undefined;
     const password = u.password ? decodeURIComponent(u.password) : undefined;
     return { server, username, password };
   } catch {
-    return { server: proxyUrl };
+    return undefined;
   }
 }
 

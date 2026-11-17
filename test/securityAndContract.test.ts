@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
-import { request, type Server } from 'node:http';
+import { createServer, request, type Server } from 'node:http';
+import WebSocket from 'ws';
 import { app } from '../src/index';
 import {
   validateTargetUrl,
   isPrivateOrReservedIp,
   sanitizeLogMeta,
 } from '../src/security';
-import { parseProxy, config, logInfo, getLogs } from '../src/config';
+import { intEnv, parseProxy, config, logInfo, getLogs } from '../src/config';
+import { maskProxy } from '../src/proxyPool';
+import { attachMobileTunnel, closeMobileTunnel, getMobileDial } from '../src/mobileTunnel';
 import { sanitizeTargetSiteUrl, isProxyOrTunnelError, requiresTurnstileToken, solverQueue } from '../src/solver';
 import { ConcurrencyQueue, QueueFullError } from '../src/queue';
 import { BrowserManager } from '../src/browser';
@@ -233,6 +236,7 @@ async function runTests() {
     }
     const statsRes = await fetch(`${baseUrl}/stats`, { headers: authHeaders });
     assert.equal(statsRes.status, 200);
+    const statsBefore = await statsRes.json() as { totalSolves: number; successfulSolves: number };
 
     const workerUrl = `${baseUrl}/workers/leetcode`;
     const registration = await fetch(`${workerUrl}/register`, { method: 'POST', headers: authHeaders });
@@ -262,10 +266,64 @@ async function runTests() {
     const relayed = await queuedSolve;
     assert.equal(relayed.status, 200);
     assert.deepEqual((await relayed.json() as Record<string, unknown>).token, fixtureToken);
+
+    const statsAfterRes = await fetch(`${baseUrl}/stats`, { headers: authHeaders });
+    assert.equal(statsAfterRes.status, 200);
+    const statsAfter = await statsAfterRes.json() as { totalSolves: number; successfulSolves: number };
+    assert.equal(statsAfter.totalSolves, statsBefore.totalSolves + 1);
+    assert.equal(statsAfter.successfulSolves, statsBefore.successfulSolves + 1);
+
+    // Idle stale worker can re-register without conflict; in-flight job blocks non-replace register
+    const reRegIdle = await fetch(`${workerUrl}/register`, { method: 'POST', headers: authHeaders });
+    assert.equal(reRegIdle.status, 201);
+    const { token: idleRotatedToken } = await reRegIdle.json() as { token: string };
+    assert.notEqual(idleRotatedToken, workerToken);
+    const idleWorkerHeaders = { ...authHeaders, Authorization: `Bearer ${idleRotatedToken}` };
+
+    const queued2 = fetch(`${baseUrl}/solve`, {
+      method: 'POST', headers: authHeaders,
+      body: JSON.stringify({ siteurl: 'https://leetcode.com/accounts/login/', timeout: 5000 }),
+      signal: AbortSignal.timeout(8000),
+    });
+    let claimed2: { id: string } | undefined;
+    for (let i = 0; i < 40 && !claimed2; i++) {
+      const r = await fetch(`${workerUrl}/next`, { headers: idleWorkerHeaders });
+      if (r.status === 200) claimed2 = await r.json() as { id: string };
+      if (!claimed2) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(claimed2);
+    const blockedReReg = await fetch(`${workerUrl}/register`, { method: 'POST', headers: authHeaders });
+    assert.equal(blockedReReg.status, 409);
+    const forcedReReg = await fetch(`${workerUrl}/register`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ replace: true }),
+    });
+    assert.equal(forcedReReg.status, 201);
+    const { token: replacedToken } = await forcedReReg.json() as { token: string };
+    const replacedHeaders = { ...authHeaders, Authorization: `Bearer ${replacedToken}` };
+    const reClaim = await fetch(`${workerUrl}/next`, { headers: replacedHeaders });
+    assert.equal(reClaim.status, 200);
+    const reClaimed = await reClaim.json() as { id: string };
+    assert.equal(reClaimed.id, claimed2.id);
+    const upload2 = await fetch(`${workerUrl}/${reClaimed.id}/result`, {
+      method: 'POST', headers: replacedHeaders, body: JSON.stringify({ token: fixtureToken }),
+    });
+    assert.equal(upload2.status, 204);
+    const relayed2 = await queued2;
+    assert.equal(relayed2.status, 200);
+
     const logsRes = await fetch(`${baseUrl}/logs?limit=5`, {
       headers: { 'x-api-key': 'unit_test_secret_token_987654' },
     });
     assert.equal(logsRes.status, 200);
+    const badLimitLogsRes = await fetch(`${baseUrl}/logs?limit=abc`, {
+      headers: authHeaders,
+    });
+    assert.equal(badLimitLogsRes.status, 200);
+    const badLimitPayload = await badLimitLogsRes.json() as { ok: boolean; count: number };
+    assert.equal(badLimitPayload.ok, true);
+    assert.ok(badLimitPayload.count >= 1);
     const proxiesRes = await fetch(`${baseUrl}/proxies`, { headers: authHeaders });
     assert.equal(proxiesRes.status, 200);
 
@@ -311,6 +369,16 @@ async function runTests() {
     });
     assert.equal(badLoginTimeoutRes.status, 400);
 
+    const mobileDisconnectedLoginRes = await fetch(`${baseUrl}/leetcode-login`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ username: 'scale5558', password: 'secret', proxy: 'mobile' }),
+    });
+    assert.equal(mobileDisconnectedLoginRes.status, 503);
+    const mobileDisconnectedBody = await mobileDisconnectedLoginRes.json() as { ok: boolean; code?: string };
+    assert.equal(mobileDisconnectedBody.ok, false);
+    assert.equal(mobileDisconnectedBody.code, 'MOBILE_TUNNEL_DISCONNECTED');
+
     console.log('✓ HTTP API authentication, CORS, schema validation, and SSRF protection passed');
   } finally {
     if (prevToken === undefined) {
@@ -320,6 +388,57 @@ async function runTests() {
     }
     await new Promise((resolve) => server.close(resolve));
     await BrowserManager.getInstance().close();
+  }
+
+  // Regression assertions for intEnv, host:port:user:pass proxy masking, BrowserManager closed guard, and mobileTunnel pre-open close
+  assert.equal(intEnv('abc', 42, 1, 100), 42);
+  assert.equal(intEnv('0', 42, 5, 100), 5);
+  assert.equal(intEnv('500', 42, 1, 100), 100);
+  assert.deepEqual(parseProxy('1.2.3.4:8080:alice:supersecret'), {
+    server: 'http://1.2.3.4:8080',
+    username: 'alice',
+    password: 'supersecret',
+  });
+  const maskedHpup = maskProxy('1.2.3.4:8080:alice:supersecret');
+  assert.equal(maskedHpup, 'http://alice:****@1.2.3.4:8080');
+  assert.ok(!maskedHpup.includes('supersecret'));
+
+  await BrowserManager.getInstance().recycle();
+  await assert.rejects(() => BrowserManager.getInstance().ensureBrowser(), /BrowserManager is closed/);
+
+  const prevMobileToken = process.env.CPSOLVER_MOBILE_TOKEN;
+  const mobileSecret = 'mobile_tunnel_regression_secret_1234567890';
+  process.env.CPSOLVER_MOBILE_TOKEN = mobileSecret;
+  const wsHttpServer = createServer();
+  attachMobileTunnel(wsHttpServer);
+  await new Promise<void>((resolve) => wsHttpServer.listen(0, '127.0.0.1', resolve));
+  try {
+    const wsPort = (wsHttpServer.address() as { port: number }).port;
+    const clientWs = new WebSocket(`ws://127.0.0.1:${wsPort}/mobile/leetcode/tunnel`);
+    await new Promise<void>((resolve, reject) => {
+      clientWs.once('error', reject);
+      clientWs.once('open', () => {
+        clientWs.send(JSON.stringify({ t: 'auth', token: mobileSecret }));
+      });
+      clientWs.on('message', (raw) => {
+        const msg = JSON.parse(raw.toString()) as { t?: string; id?: number };
+        if (msg.t === 'auth_ok') resolve();
+        else if (msg.t === 'open' && typeof msg.id === 'number') {
+          clientWs.send(JSON.stringify({ t: 'close', id: msg.id }));
+        }
+      });
+    });
+    const dial = getMobileDial();
+    assert.ok(dial);
+    const dialStartedAt = Date.now();
+    await assert.rejects(() => dial('leetcode.com'), /closed before opening/);
+    assert.ok(Date.now() - dialStartedAt < 2_000, 'Pre-open mobile close should fail promptly');
+    clientWs.close();
+  } finally {
+    closeMobileTunnel();
+    await new Promise<void>((resolve) => wsHttpServer.close(() => resolve()));
+    if (prevMobileToken === undefined) delete process.env.CPSOLVER_MOBILE_TOKEN;
+    else process.env.CPSOLVER_MOBILE_TOKEN = prevMobileToken;
   }
 
   console.log('=== All CPSolver Security & Contract Tests Passed! ===');

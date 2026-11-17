@@ -13,6 +13,7 @@ export type MobileDial = (host: string) => Promise<Duplex>;
 interface OpenStream {
   socket: Duplex;
   ready: () => void;
+  opened: boolean;
 }
 
 class MobileSession {
@@ -58,7 +59,16 @@ class MobileSession {
         },
       });
       stream.on('error', () => {});
-      this.streams.set(id, { socket: stream, ready: () => { clearTimeout(timer); resolve(stream); } });
+      const entry: OpenStream = {
+        socket: stream,
+        opened: false,
+        ready: () => {
+          entry.opened = true;
+          clearTimeout(timer);
+          resolve(stream);
+        },
+      };
+      this.streams.set(id, entry);
       this.send({ t: 'open', id, host, port: 443 });
     });
   };
@@ -85,8 +95,12 @@ class MobileSession {
     if (message.t === 'opened') stream.ready();
     else if (message.t === 'err') stream.socket.destroy(new Error('Android could not reach the HTTPS destination'));
     else if (message.t === 'close') {
-      stream.socket.push(null);
-      stream.socket.end();
+      if (!stream.opened) {
+        stream.socket.destroy(new Error('Android tunnel stream closed before opening'));
+      } else {
+        stream.socket.push(null);
+        stream.socket.end();
+      }
     }
   }
 }
@@ -110,6 +124,7 @@ export function closeMobileTunnel(): void {
 
 export function attachMobileTunnel(server: Server): void {
   server.on('upgrade', (request, socket, head) => {
+    socket.on('error', () => socket.destroy());
     const token = mobileToken();
     if (request.url !== '/mobile/leetcode/tunnel' || !token) {
       socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');

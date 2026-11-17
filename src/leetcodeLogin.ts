@@ -1,6 +1,8 @@
-import type { BrowserContext, Page, Response } from 'patchright';
+import type { BrowserContext, Frame, Page, Response } from 'patchright';
 import { BrowserManager } from './browser';
 import { logInfo, logWarn, parseProxy } from './config';
+import { openLeetCodeEgress } from './leetcodeEgress';
+import { getMobileDial, type MobileDial } from './mobileTunnel';
 import { proxyPool, maskProxy } from './proxyPool';
 import { solverQueue, solverStats } from './solver';
 import { interactWithTurnstileCheckbox } from './stealth';
@@ -258,10 +260,12 @@ async function runSingleLoginAttempt(params: {
   username: string;
   password: string;
   proxyConfig?: ProxyConfig;
+  mobileDial?: MobileDial;
   proxyLabel: string;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<SingleAttemptOutcome> {
-  const { username, password, proxyConfig, proxyLabel, timeoutMs } = params;
+  const { username, password, proxyConfig, mobileDial, proxyLabel, timeoutMs, signal } = params;
   const startedAt = Date.now();
   const deadline = startedAt + timeoutMs;
   const remaining = () => Math.max(0, deadline - Date.now());
@@ -269,11 +273,29 @@ async function runSingleLoginAttempt(params: {
   const browserManager = BrowserManager.getInstance();
   let context: BrowserContext | null = null;
   let page: Page | null = null;
+  let egress: Awaited<ReturnType<typeof openLeetCodeEgress>> | undefined;
   let challengeObserved = 'none';
+  const clickedFrames = new WeakMap<Frame, string>();
+  const onAbort = () => {
+    void page?.close().catch(() => {});
+    void context?.close().catch(() => {});
+    egress?.close();
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
 
   try {
-    context = await browserManager.createContext(proxyConfig);
+    signal?.throwIfAborted();
+    if (mobileDial || !proxyConfig || /^https?:\/\//i.test(proxyConfig.server)) {
+      egress = await openLeetCodeEgress(proxyConfig, mobileDial);
+    }
+    signal?.throwIfAborted();
+    context = await browserManager.createContext(egress ?? proxyConfig, undefined, Boolean(egress));
+    if (signal?.aborted) {
+      await context.close().catch(() => {});
+      signal.throwIfAborted();
+    }
     page = await context.newPage();
+    signal?.throwIfAborted();
 
     await page.route('**/*', (route) => {
       const req = route.request();
@@ -312,6 +334,7 @@ async function runSingleLoginAttempt(params: {
     let snapshot = await inspectLoginPage(page);
 
     while (!snapshot.hasForm && Date.now() < interstitialDeadline && remaining() > 8_000) {
+      signal?.throwIfAborted();
       const alreadySignedIn = await verifySignedInUser(page, context);
       if (alreadySignedIn.signedIn && alreadySignedIn.username) {
         const rawState = (await context.storageState()) as unknown as LeetCodeLoginStorageState;
@@ -331,7 +354,7 @@ async function runSingleLoginAttempt(params: {
       if (snapshot.isInterstitial || hasChallengeFrame(page)) {
         challengeObserved = 'cloudflare_interstitial';
         if (Date.now() - lastCheckboxClick >= 3_500) {
-          const clicked = await interactWithTurnstileCheckbox(page);
+          const clicked = await interactWithTurnstileCheckbox(page, clickedFrames);
           if (clicked) {
             lastCheckboxClick = Date.now();
           }
@@ -363,8 +386,9 @@ async function runSingleLoginAttempt(params: {
       if (challengeObserved === 'none') challengeObserved = 'turnstile';
       const inlineWaitUntil = Math.min(deadline - 10_000, Date.now() + 12_000);
       while (!snapshot.turnstileToken && Date.now() < inlineWaitUntil) {
+        signal?.throwIfAborted();
         if (Date.now() - lastCheckboxClick >= 3_500) {
-          const clicked = await interactWithTurnstileCheckbox(page);
+          const clicked = await interactWithTurnstileCheckbox(page, clickedFrames);
           if (clicked) {
             lastCheckboxClick = Date.now();
           }
@@ -391,9 +415,10 @@ async function runSingleLoginAttempt(params: {
     // Wait briefly if submit button is disabled awaiting inline Turnstile completion
     const enableWaitUntil = Math.min(deadline - 8_000, Date.now() + 10_000);
     while (!(await submitBtn.isEnabled().catch(() => false)) && Date.now() < enableWaitUntil) {
+      signal?.throwIfAborted();
       if (hasChallengeFrame(page) && Date.now() - lastCheckboxClick >= 3_500) {
         if (challengeObserved === 'none') challengeObserved = 'turnstile';
-        if (await interactWithTurnstileCheckbox(page)) {
+        if (await interactWithTurnstileCheckbox(page, clickedFrames)) {
           lastCheckboxClick = Date.now();
         }
       }
@@ -419,6 +444,7 @@ async function runSingleLoginAttempt(params: {
     // Phase 4: Verify authenticated session or handle deferred Turnstile/error
     let retriedPostSubmit = false;
     while (remaining() > 0) {
+      signal?.throwIfAborted();
       const auth = await verifySignedInUser(page, context);
       if (auth.signedIn && auth.username) {
         const rawState = (await context.storageState()) as unknown as LeetCodeLoginStorageState;
@@ -486,6 +512,7 @@ async function runSingleLoginAttempt(params: {
         }
         const retryWaitUntil = Math.min(deadline - 4_000, Date.now() + 12_000);
         while (Date.now() < retryWaitUntil) {
+          signal?.throwIfAborted();
           const authNow = await verifySignedInUser(page, context);
           if (authNow.signedIn && authNow.username) {
             const rawState = (await context.storageState()) as unknown as LeetCodeLoginStorageState;
@@ -502,7 +529,7 @@ async function runSingleLoginAttempt(params: {
             };
           }
           if (Date.now() - lastCheckboxClick >= 3_000) {
-            if (await interactWithTurnstileCheckbox(page)) {
+            if (await interactWithTurnstileCheckbox(page, clickedFrames)) {
               lastCheckboxClick = Date.now();
             }
           }
@@ -534,9 +561,10 @@ async function runSingleLoginAttempt(params: {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
+      ...(signal?.aborted ? { nonRetryable: true } : {}),
       result: {
         ok: false,
-        code: 'LOGIN_BROWSER_ERROR',
+        code: signal?.aborted ? 'LOGIN_CANCELLED' : 'LOGIN_BROWSER_ERROR',
         error: message,
         durationMs: Date.now() - startedAt,
         proxyUsed: proxyLabel,
@@ -544,8 +572,10 @@ async function runSingleLoginAttempt(params: {
       },
     };
   } finally {
+    signal?.removeEventListener('abort', onAbort);
     if (page) await page.close().catch(() => {});
     if (context) await context.close().catch(() => {});
+    egress?.close();
     await browserManager.notifySolveCompleted(solverQueue.active).catch(() => {});
   }
 }
@@ -555,36 +585,56 @@ async function runSingleLoginAttempt(params: {
  * on CPSolver (Xvfb headless=false), guaranteeing every Cloudflare challenge and form
  * submission shares the exact same IP and TLS fingerprint.
  */
-export async function solveLeetCodeLogin(req: LeetCodeLoginRequest): Promise<LeetCodeLoginResult> {
+export async function solveLeetCodeLogin(req: LeetCodeLoginRequest, signal?: AbortSignal): Promise<LeetCodeLoginResult> {
   const startTime = Date.now();
   const totalTimeout = Math.min(
     MAX_LOGIN_TIMEOUT_MS,
     Math.max(MIN_LOGIN_TIMEOUT_MS, req.timeout ?? DEFAULT_LOGIN_TIMEOUT_MS),
   );
 
-  return solverQueue.run(async () => {
+  return solverQueue.run(async (workSignal) => {
+    workSignal.throwIfAborted();
     const deadline = startTime + totalTimeout;
     const rawProxy = typeof req.proxy === 'string' ? req.proxy.trim() : '';
+    const rawLower = rawProxy.toLowerCase();
 
-    const attempts: Array<{ proxyConfig?: ProxyConfig; proxyLabel: string; poolIndex?: number }> = [];
+    const attempts: Array<{
+      proxyConfig?: ProxyConfig;
+      mobileDial?: MobileDial;
+      proxyLabel: string;
+      poolIndex?: number;
+    }> = [];
 
     if (req.proxy && typeof req.proxy === 'object') {
       attempts.push({ proxyConfig: req.proxy, proxyLabel: maskProxy(req.proxy.server) });
       attempts.push({ proxyConfig: undefined, proxyLabel: 'direct' });
-    } else if (rawProxy.toLowerCase() === 'direct') {
+    } else if (rawLower === 'mobile') {
+      const dial = getMobileDial();
+      if (!dial) {
+        solverStats.recordFailure();
+        return {
+          ok: false,
+          code: 'MOBILE_TUNNEL_DISCONNECTED',
+          error: 'Android tunnel is disconnected',
+          durationMs: Date.now() - startTime,
+        };
+      }
+      attempts.push({ mobileDial: dial, proxyLabel: 'android-tunnel' });
+    } else if (['direct', 'none', 'off'].includes(rawLower)) {
       attempts.push({ proxyConfig: undefined, proxyLabel: 'direct' });
-    } else if (rawProxy) {
+    } else if (rawProxy && rawLower !== 'auto') {
       const parsed = parseProxy(rawProxy);
       if (parsed) {
         attempts.push({ proxyConfig: parsed, proxyLabel: maskProxy(rawProxy) });
       }
       attempts.push({ proxyConfig: undefined, proxyLabel: 'direct' });
     } else {
-      // Zero-proxy default: run direct first on Patchright + Xvfb so stale env proxies never stall login;
-      // fall back to configured pool proxies only if direct fails and pool entries exist.
-      attempts.push({ proxyConfig: undefined, proxyLabel: 'direct' });
+      const dial = getMobileDial();
+      if (dial) {
+        attempts.push({ mobileDial: dial, proxyLabel: 'android-tunnel' });
+      }
       if (proxyPool.size > 0) {
-        const poolCount = Math.min(2, proxyPool.size);
+        const poolCount = Math.min(3, proxyPool.size);
         for (let i = 0; i < poolCount; i++) {
           const idx = (proxyPool.currentIndex + i) % proxyPool.size;
           const pCfg = proxyPool.getProxyAt(idx);
@@ -598,6 +648,7 @@ export async function solveLeetCodeLogin(req: LeetCodeLoginRequest): Promise<Lee
           }
         }
       }
+      attempts.push({ proxyConfig: undefined, proxyLabel: 'direct' });
     }
 
     let lastResult: LeetCodeLoginResult = {
@@ -608,21 +659,28 @@ export async function solveLeetCodeLogin(req: LeetCodeLoginRequest): Promise<Lee
     };
 
     for (let i = 0; i < attempts.length; i++) {
+      workSignal.throwIfAborted();
       const step = attempts[i]!;
       const remaining = deadline - Date.now();
-      if (remaining < 12_000) {
+      if (remaining < 12_000 && i > 0) {
         break;
       }
 
+      const attemptsLeft = attempts.length - i;
+      const reserveForRest = (attemptsLeft - 1) * 18_000;
       const attemptBudget =
-        i < attempts.length - 1 ? Math.min(Math.max(45_000, Math.floor(remaining * 0.65)), remaining) : remaining;
+        attemptsLeft > 1
+          ? Math.max(15_000, Math.min(45_000, remaining - reserveForRest, Math.ceil(remaining / attemptsLeft) + 8_000))
+          : Math.max(1_000, remaining);
 
       const outcome = await runSingleLoginAttempt({
         username: req.username,
         password: req.password,
         proxyConfig: step.proxyConfig,
+        mobileDial: step.mobileDial,
         proxyLabel: step.proxyLabel,
         timeoutMs: attemptBudget,
+        signal: workSignal,
       });
 
       lastResult = outcome.result;
@@ -660,5 +718,5 @@ export async function solveLeetCodeLogin(req: LeetCodeLoginRequest): Promise<Lee
       ...lastResult,
       durationMs: Date.now() - startTime,
     };
-  });
+  }, signal, totalTimeout + 5_000);
 }

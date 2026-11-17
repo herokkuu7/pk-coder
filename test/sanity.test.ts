@@ -79,6 +79,14 @@ async function runTests() {
 
   // Test 4: Express HTTP endpoints
   console.log('[Test 4] Verifying HTTP endpoints...');
+  const prevToken = process.env.CPSOLVER_API_TOKEN;
+  const testToken = prevToken?.trim() || 'sanity_test_api_token_12345';
+  process.env.CPSOLVER_API_TOKEN = testToken;
+  const authHeaders = {
+    Authorization: `Bearer ${testToken}`,
+    'Content-Type': 'application/json',
+  };
+
   const testPort = 19999;
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(testPort, '127.0.0.1', () => resolve(s));
@@ -103,7 +111,9 @@ async function runTests() {
     assert.equal(rootJson.service, 'CPSolver');
 
     // 4.3 GET /stats
-    const statsRes = await fetch(`${baseUrl}/stats`);
+    const statsRes = await fetch(`${baseUrl}/stats`, {
+      headers: { Authorization: `Bearer ${testToken}` },
+    });
     assert.equal(statsRes.status, 200);
     const statsJson = await statsRes.json() as Record<string, unknown>;
     assert.equal(typeof statsJson.totalSolves, 'number');
@@ -112,7 +122,7 @@ async function runTests() {
     // Missing body
     const badRes1 = await fetch(`${baseUrl}/solve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({}),
     });
     assert.equal(badRes1.status, 400);
@@ -120,7 +130,7 @@ async function runTests() {
     // Invalid URL
     const badRes2 = await fetch(`${baseUrl}/solve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({ siteurl: 'not-a-url', sitekey: '0x4AAAAAA' }),
     });
     assert.equal(badRes2.status, 400);
@@ -128,7 +138,7 @@ async function runTests() {
     // Missing sitekey
     const badRes3 = await fetch(`${baseUrl}/solve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({ siteurl: 'https://example.com', sitekey: '' }),
     });
     assert.equal(badRes3.status, 400);
@@ -137,7 +147,7 @@ async function runTests() {
     console.log('[Test 5] Live solve with non-interactive sitekey (1x00000000000000000000AA)...');
     const solveRes5 = await fetch(`${baseUrl}/solve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({
         siteurl: 'https://example.com',
         sitekey: '1x00000000000000000000AA',
@@ -155,7 +165,7 @@ async function runTests() {
     const t0 = Date.now();
     const solveRes6 = await fetch(`${baseUrl}/solve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({
         siteurl: 'https://example.com',
         sitekey: '2x00000000000000000000AB',
@@ -173,7 +183,7 @@ async function runTests() {
     console.log('[Test 7] Live interactive solve with checkbox interaction (3x00000000000000000000FF)...');
     const solveRes7 = await fetch(`${baseUrl}/solve`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({
         siteurl: 'https://example.com',
         sitekey: '3x00000000000000000000FF',
@@ -188,6 +198,11 @@ async function runTests() {
 
     console.log('✓ All HTTP endpoint and live solving tests passed');
   } finally {
+    if (prevToken === undefined) {
+      delete process.env.CPSOLVER_API_TOKEN;
+    } else {
+      process.env.CPSOLVER_API_TOKEN = prevToken;
+    }
     await new Promise((resolve) => server.close(resolve));
     const { BrowserManager } = await import('../src/browser');
     await BrowserManager.getInstance().close();
@@ -198,5 +213,5 @@ async function runTests() {
 
 runTests().catch((err) => {
   console.error('Test execution failed:', err);
-  process.exit(1);
+  process.exitCode = 1;
 });
